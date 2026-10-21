@@ -84,10 +84,13 @@ app.MapHealthChecks("/health").AllowAnonymous();
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi().AllowAnonymous();
-    app.MapScalarApiReference("/docs", o => o
-            .WithTitle("Company Registry API")
-            .DisableAgent()
-            .DisableTelemetry())
+    app.MapScalarApiReference("/docs", o =>
+        {
+            o.WithTitle("Company Registry API").DisableAgent().DisableTelemetry();
+            o.ShowDeveloperTools = DeveloperToolsVisibility.Never;
+            // Hide Scalar's "Generate SDK" promotions; they are not part of this API.
+            o.CustomCss = ".explore-scalar, .generate-sdk-button, .selected-client-action.scalar-button-gradient { display: none !important; }";
+        })
         .AllowAnonymous();
 }
 
