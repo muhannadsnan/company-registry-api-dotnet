@@ -84,7 +84,11 @@ app.MapHealthChecks("/health").AllowAnonymous();
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi().AllowAnonymous();
-    app.MapScalarApiReference("/docs").AllowAnonymous();
+    app.MapScalarApiReference("/docs", o => o
+            .WithTitle("Company Registry API")
+            .DisableAgent()
+            .DisableTelemetry())
+        .AllowAnonymous();
 }
 
 if (app.Configuration.GetValue<bool>("Database:MigrateOnStartup"))
