@@ -1,5 +1,7 @@
 # company-registry-api-dotnet
 
+[![CI](https://github.com/muhannadsnan/company-registry-api-dotnet/actions/workflows/ci.yml/badge.svg)](https://github.com/muhannadsnan/company-registry-api-dotnet/actions/workflows/ci.yml)
+
 A small ASP.NET Core Web API over Norwegian company data. It imports companies from
 [Enhetsregisteret](https://data.brreg.no/enhetsregisteret/api/dokumentasjon/no/index.html)
 (Brønnøysundregistrene) into PostgreSQL, and serves them through a search API protected by
