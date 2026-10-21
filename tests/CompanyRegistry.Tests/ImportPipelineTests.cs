@@ -27,7 +27,7 @@ public class ImportPipelineTests(ApiFactory api)
         Assert.Equal("import-test-1", first.CorrelationId);
         Assert.Equal("importer", first.RequestedBy);
         Assert.Equal((3, 2, 0, 0, 1), (first.RowsRead, first.RowsInserted, first.RowsUpdated, first.RowsUnchanged, first.RowsRejected));
-        Assert.Contains(api.Brreg.Requests, uri => uri.Query.Contains("kommunenummer=3905"));
+        Assert.Contains(api.Brreg.Requests, uri => uri.Query.Contains("kommunenummer=3901%2C3905&organisasjonsform=AS%2CASA"));
 
         // Same data plus one renamed company: one update, one untouched row, nothing duplicated.
         api.Brreg.Units =

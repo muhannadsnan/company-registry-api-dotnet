@@ -9,11 +9,11 @@ public sealed class ImportOptions
     [Required, Url]
     public string BaseUrl { get; set; } = "https://data.brreg.no/";
 
-    /// <summary>Kommunenummer filter, e.g. 3905 for Tønsberg. Null imports every municipality.</summary>
-    public string? MunicipalityNumber { get; set; }
+    /// <summary>Kommunenummer filter, e.g. 3901 (Horten) and 3905 (Tønsberg). Empty imports every municipality.</summary>
+    public List<string> MunicipalityNumbers { get; set; } = [];
 
-    /// <summary>Organisasjonsform filter, e.g. AS. Null imports every form.</summary>
-    public string? OrganisationForm { get; set; }
+    /// <summary>Organisasjonsform filter, e.g. AS and ASA. Empty imports every form.</summary>
+    public List<string> OrganisationForms { get; set; } = [];
 
     [Range(1, 1000)]
     public int PageSize { get; set; } = 500;

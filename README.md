@@ -37,8 +37,10 @@ curl -s "localhost:5080/api/companies?name=bil&pageSize=5" -H "Authorization: Be
 curl -s localhost:5080/api/companies/912855414 -H "Authorization: Bearer $TOKEN"
 ```
 
-By default the import fetches all aksjeselskap (AS) in Tønsberg, about 5,600 companies. That
-takes roughly five seconds. The filter is set under `Import` in `appsettings.json`.
+By default the import fetches all AS and ASA companies in Horten and Tønsberg, about 7,200
+companies. That takes roughly five seconds. The filter is set under `Import` in `appsettings.json`.
+Brreg's municipality filter matches the postal address as well as the business address, so a
+few imported companies have their business address in another municipality.
 
 Interactive API reference: http://localhost:5080/docs (development only; paste the token into the auth field).
 
@@ -74,7 +76,7 @@ Errors are returned as RFC 9457 problem details, and each one includes the reque
 - **Upsert, safe to re-run.** Each page loads the existing companies it contains in one query.
   New ones are inserted and existing ones are updated. EF Core's change tracking compares
   against the loaded values, so an unchanged company produces no SQL at all. A second run over
-  the same data reports `unchanged: 5568` and writes nothing.
+  the same data reports every row as unchanged and writes nothing.
 - **One transaction per page.** A failure on page 7 keeps pages 1–6. Running the import again
   picks up where it failed, because the upsert makes repeats harmless.
 - **The import log is a table.** `import_runs` records who triggered each run and when, how it

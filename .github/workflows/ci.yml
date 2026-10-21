@@ -18,8 +18,22 @@ jobs:
       - name: Restore
         run: dotnet restore
 
+      - name: Check formatting
+        run: dotnet format --verify-no-changes --no-restore
+
+      - name: Check for vulnerable packages
+        run: |
+          dotnet list package --vulnerable --include-transitive | tee vulnerable.txt
+          ! grep -q "has the following vulnerable packages" vulnerable.txt
+
       - name: Build
         run: dotnet build --no-restore --configuration Release -warnaserror
+
+      # Fails if an entity was changed without adding a migration for it.
+      - name: Check for missing migrations
+        run: |
+          dotnet tool restore
+          dotnet ef migrations has-pending-model-changes --project src/CompanyRegistry.Api --configuration Release --no-build
 
       # Integration tests start a throwaway Postgres with Testcontainers; the runner already has Docker.
       - name: Test

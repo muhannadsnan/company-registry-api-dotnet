@@ -15,8 +15,9 @@ public sealed class BrregClient(HttpClient http, IOptions<ImportOptions> options
         {
             ["page"] = page.ToString(),
             ["size"] = o.PageSize.ToString(),
-            ["kommunenummer"] = o.MunicipalityNumber,
-            ["organisasjonsform"] = o.OrganisationForm,
+            // Brreg takes several values as a comma-separated list.
+            ["kommunenummer"] = string.Join(',', o.MunicipalityNumbers),
+            ["organisasjonsform"] = string.Join(',', o.OrganisationForms),
         };
         var url = "enhetsregisteret/api/enheter?" + string.Join('&', query
             .Where(kv => !string.IsNullOrEmpty(kv.Value))
