@@ -27,7 +27,7 @@ namespace CompanyRegistry.Api.Data.Migrations
                     b.Property<string>("OrganisationNumber")
                         .HasMaxLength(9)
                         .HasColumnType("character(9)")
-                        .HasColumnName("organisation_number")
+                        .HasColumnName("orgnr")
                         .IsFixedLength();
 
                     b.Property<DateTimeOffset>("FirstImportedAt")
@@ -58,12 +58,7 @@ namespace CompanyRegistry.Api.Data.Migrations
                         .IsRequired()
                         .HasMaxLength(10)
                         .HasColumnType("character varying(10)")
-                        .HasColumnName("organisation_form_code");
-
-                    b.Property<string>("OrganisationFormDescription")
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)")
-                        .HasColumnName("organisation_form_description");
+                        .HasColumnName("form_code");
 
                     b.Property<string>("PostalCode")
                         .HasMaxLength(10)
@@ -91,7 +86,7 @@ namespace CompanyRegistry.Api.Data.Migrations
                         .HasDatabaseName("ix_companies_municipality_number");
 
                     b.HasIndex("OrganisationFormCode")
-                        .HasDatabaseName("ix_companies_organisation_form_code");
+                        .HasDatabaseName("ix_companies_form_code");
 
                     b.HasIndex("PostalCode")
                         .HasDatabaseName("ix_companies_postal_code");

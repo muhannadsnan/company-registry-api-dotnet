@@ -151,7 +151,6 @@ public sealed class CompanyImporter(
         var address = unit.Forretningsadresse;
         company.Name = unit.Navn!;
         company.OrganisationFormCode = unit.Organisasjonsform!.Kode!;
-        company.OrganisationFormDescription = unit.Organisasjonsform.Beskrivelse;
         company.StreetAddress = address?.Adresse is { Count: > 0 } lines ? string.Join(", ", lines) : null;
         company.PostalCode = address?.Postnummer;
         company.PostalPlace = address?.Poststed;

@@ -8,7 +8,6 @@ public sealed record CompanyDto(
     string OrganisationNumber,
     string Name,
     string OrganisationFormCode,
-    string? OrganisationFormDescription,
     AddressDto Address,
     DateOnly? RegistrationDate,
     DateTimeOffset LastChangedAt)
@@ -18,7 +17,6 @@ public sealed record CompanyDto(
         c.OrganisationNumber,
         c.Name,
         c.OrganisationFormCode,
-        c.OrganisationFormDescription,
         new AddressDto(c.StreetAddress, c.PostalCode, c.PostalPlace, c.MunicipalityNumber, c.Municipality),
         c.RegistrationDate,
         c.LastChangedAt);

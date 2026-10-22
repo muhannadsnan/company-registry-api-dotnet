@@ -12,10 +12,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         modelBuilder.Entity<Company>(company =>
         {
             company.HasKey(c => c.OrganisationNumber);
-            company.Property(c => c.OrganisationNumber).HasMaxLength(9).IsFixedLength();
+            // Short column names in the database; the C# names stay descriptive.
+            company.Property(c => c.OrganisationNumber).HasColumnName("orgnr").HasMaxLength(9).IsFixedLength();
             company.Property(c => c.Name).HasMaxLength(500);
-            company.Property(c => c.OrganisationFormCode).HasMaxLength(10);
-            company.Property(c => c.OrganisationFormDescription).HasMaxLength(200);
+            company.Property(c => c.OrganisationFormCode).HasColumnName("form_code").HasMaxLength(10);
             company.Property(c => c.StreetAddress).HasMaxLength(500);
             company.Property(c => c.PostalCode).HasMaxLength(10);
             company.Property(c => c.PostalPlace).HasMaxLength(100);

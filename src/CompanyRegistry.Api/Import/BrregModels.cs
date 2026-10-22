@@ -19,7 +19,7 @@ public sealed record BrregEnhet(
     BrregAdresse? Forretningsadresse,
     DateOnly? RegistreringsdatoEnhetsregisteret);
 
-public sealed record BrregKode(string? Kode, string? Beskrivelse);
+public sealed record BrregKode(string? Kode);
 
 public sealed record BrregAdresse(
     IReadOnlyList<string>? Adresse,
