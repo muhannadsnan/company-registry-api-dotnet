@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 on:
   push:
@@ -45,3 +45,36 @@ jobs:
         with:
           name: test-results
           path: test-results
+
+  # CD: only for pushes to main, and only after every check and test above has passed.
+  deploy:
+    needs: build-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build and push the image to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+          docker build \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --tag "$IMAGE:${{ github.sha }}" --tag "$IMAGE:latest" .
+          docker push --all-tags "$IMAGE"
+
+      # Render pulls exactly the image built from this commit.
+      - name: Deploy to Render
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
+            echo "::warning::RENDER_DEPLOY_HOOK_URL is not set; image pushed but not deployed."
+            exit 0
+          fi
+          image_url=$(jq -rn --arg v "$IMAGE:${{ github.sha }}" '$v|@uri')
+          curl --fail --silent --show-error --request POST "$RENDER_DEPLOY_HOOK_URL&imgURL=$image_url"

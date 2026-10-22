@@ -81,7 +81,7 @@ app.UseAuthorization();
 
 app.MapControllers();
 app.MapHealthChecks("/health").AllowAnonymous();
-if (app.Environment.IsDevelopment())
+if (app.Configuration.GetValue<bool>("Docs:Enabled"))
 {
     app.MapOpenApi().AllowAnonymous();
     app.MapScalarApiReference("/docs", o =>
