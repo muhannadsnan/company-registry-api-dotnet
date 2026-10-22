@@ -12,6 +12,24 @@ scoped bearer tokens.
 It is deliberately small. The aim is a finished, tidy core where each part can be explained,
 not a large feature list.
 
+## Live demo
+
+https://company-registry-api-dotnet-latest.onrender.com/docs
+
+It runs on Render's free plan with a free Neon Postgres, both in Frankfurt. After 15 minutes
+without traffic it goes to sleep, so the first request can take up to a minute.
+
+The demo has a public **read-only** client, so you can try the API without asking:
+
+```bash
+BASE=https://company-registry-api-dotnet-latest.onrender.com
+TOKEN=$(curl -s -X POST $BASE/connect/token \
+  -d grant_type=client_credentials -d client_id=demo-reader -d client_secret=reader-secret | jq -r .access_token)
+curl -s "$BASE/api/companies?name=horten&pageSize=5" -H "Authorization: Bearer $TOKEN"
+```
+
+The client that may start imports has a secret that is only set on the server.
+
 ## Run it
 
 You need Docker and the .NET 10 SDK.
@@ -153,7 +171,21 @@ header is the same idea at a size that fits this project.
   import pipeline: rejecting a bad row, inserting, then updating one row and leaving the other
   untouched on a second run.
 
-CI (GitHub Actions) builds with warnings as errors and runs all tests on every push.
+### CI/CD
+
+One GitHub Actions workflow, on every push:
+
+1. **CI:** check formatting, scan NuGet packages for known vulnerabilities, build with warnings
+   as errors, fail if an entity changed without a migration, then run all tests.
+2. **CD:** only on `main`, and only if every step above passed. Build a Docker image, push it to
+   GitHub Container Registry tagged with the commit SHA, and call Render's deploy hook with that
+   exact tag. Render pulls the image and switches over once `/health` answers.
+
+The image is a two-stage build: the SDK image compiles, and the runtime image carries only the
+published app and runs as a non-root user. All configuration comes from environment variables
+(`ConnectionStrings__Companies`, `Auth__SigningKey`, …), so the same image runs locally and in
+the cloud. The same pattern on Azure would be Azure Container Registry plus Container Apps or
+App Service.
 
 ## Layout
 
@@ -171,7 +203,7 @@ tests/CompanyRegistry.Tests/
 
 ## Not done here
 
-The project is local only: it is not deployed anywhere, and there is no real Maskinporten
-integration. Migrations run on startup for convenience. In a deployed setup they would run as an
-EF migration bundle in the release pipeline, and secrets would come from a vault, not from config
-files.
+There is no real Maskinporten integration; the hosted demo uses the built-in development token
+issuer with a public read-only client. Migrations run on startup for convenience. In a real
+deployment they would run as an EF migration bundle in the pipeline before the new version starts,
+and secrets would come from a vault such as Azure Key Vault rather than plain environment variables.

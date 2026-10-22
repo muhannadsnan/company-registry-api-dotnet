@@ -27,7 +27,10 @@ public sealed partial class CorrelationIdMiddleware(RequestDelegate next, ILogge
         }
         finally
         {
-            logger.LogInformation(
+            // The hosting platform polls /health every few seconds; keep those out of the normal log.
+            var level = context.Request.Path.StartsWithSegments("/health") ? LogLevel.Debug : LogLevel.Information;
+            logger.Log(
+                level,
                 "HTTP {Method} {Path} responded {StatusCode} in {ElapsedMs:0.0} ms",
                 context.Request.Method,
                 context.Request.Path.Value,
