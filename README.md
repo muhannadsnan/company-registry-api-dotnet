@@ -198,6 +198,11 @@ non-root user. ASP.NET Core serves the frontend's files and sends React routes s
 the cloud. The same pattern on Azure would be Azure Container Registry plus Container Apps or
 App Service.
 
+## Learning notes
+
+[My Learning](My%20Learning/) holds the notes I wrote while refreshing C#/.NET and moving from Vue to
+React with this project: core .NET concepts, how the API is built, the React frontend, and CI/CD.
+
 ## Layout
 
 ```
