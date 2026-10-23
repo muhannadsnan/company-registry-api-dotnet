@@ -11,6 +11,8 @@ export default function HomePage() {
                 </nav>
                 
                 <h1>Home Page</h1>
+
+                <h3>Router works. Go to search</h3>
             </>
         </main>
     )
