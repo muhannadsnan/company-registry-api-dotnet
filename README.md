@@ -1,11 +1,14 @@
 # company-registry-api-dotnet
 
-[![CI](https://github.com/muhannadsnan/company-registry-api-dotnet/actions/workflows/ci.yml/badge.svg)](https://github.com/muhannadsnan/company-registry-api-dotnet/actions/workflows/ci.yml)
+[![CI/CD](https://github.com/muhannadsnan/company-registry-api-dotnet/actions/workflows/ci.yml/badge.svg)](https://github.com/muhannadsnan/company-registry-api-dotnet/actions/workflows/ci.yml)
 
-A small ASP.NET Core Web API over Norwegian company data. It imports companies from
-[Enhetsregisteret](https://data.brreg.no/enhetsregisteret/api/dokumentasjon/no/index.html)
-(Brønnøysundregistrene) into PostgreSQL, and serves them through a search API protected by
-scoped bearer tokens.
+A small full-stack app over Norwegian company data: an ASP.NET Core Web API that imports companies
+from [Enhetsregisteret](https://data.brreg.no/enhetsregisteret/api/dokumentasjon/no/index.html)
+(Brønnøysundregistrene) into PostgreSQL and serves them through a search API protected by scoped
+bearer tokens, with a React + TypeScript frontend on top.
+
+**Live:** [company-registry-api-dotnet-latest.onrender.com](https://company-registry-api-dotnet-latest.onrender.com) ·
+[API docs](https://company-registry-api-dotnet-latest.onrender.com/docs)
 
 .NET 10 · ASP.NET Core (controllers) · Entity Framework Core · PostgreSQL · xUnit · Testcontainers ·
 React + TypeScript (Vite) · Docker · GitHub Actions
