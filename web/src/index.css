@@ -66,15 +66,14 @@ body {
   margin: 0;
 }
 
-h1,
-h2 {
+h1, h2 {
   font-family: var(--heading);
   font-weight: 500;
   color: var(--text-h);
 }
 
 h1 {
-  font-size: 56px;
+  font-size: 36px;
   letter-spacing: -1.68px;
   margin: 32px 0;
   @media (max-width: 1024px) {
@@ -95,17 +94,21 @@ p {
   margin: 0;
 }
 
-code,
-.counter {
-  font-family: var(--mono);
-  display: inline-flex;
-  border-radius: 4px;
-  color: var(--text-h);
+nav {
+    border-bottom: 1px #555 solid;
 }
-
-code {
-  font-size: 15px;
-  line-height: 135%;
-  padding: 4px 8px;
-  background: var(--code-bg);
+nav a {
+    padding: 11px 20px;
+    line-height: 45px;
+    text-decoration: none;
+    color: #ccc;
+}
+nav a:hover {
+    color: #eee;
+    background-color: #2e303a
+}
+input[type="text"] {
+    line-height: 30px;
+    padding: 5px;
+    border: 2px red solid;
 }

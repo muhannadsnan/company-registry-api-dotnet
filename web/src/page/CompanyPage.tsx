@@ -16,7 +16,7 @@ export default function CompanyPage() {
 
     return (
         <main>
-            <Link to="/">← Back to search</Link>
+            <Link to="/companies">← Back to search</Link>
 
             {error && <p role="alert">{error}</p>}
             {!company && !error && <p>Loading..</p>}
@@ -24,20 +24,19 @@ export default function CompanyPage() {
             {company && (
                 <>
                     <h1>{company.name}</h1>
-                    <dl>
-                        <dt>Orgnr</dt>
-                        <dd>{company.organisationNumber}</dd>
-                        <dt>Form</dt>
-                        <dd>{company.organisationFormCode}</dd>
-                        <dt>Adresse</dt>
-                        <dd>
+                    <h3>Orgnr: {company.organisationNumber}</h3>
+                    <div>
+                        <strong>Form: </strong>
+                        <span>{company.organisationFormCode}</span> <br/>
+                        <strong>Adresse: </strong>
+                        <span>
                             {company.address.street}, {company.address.postalCode}, {company.address.postalPlace}
-                        </dd>
-                        <dt>Kommune</dt>
-                        <dd>{company.address.municipality}</dd>
-                        <dt>Registered</dt>
-                        <dd>{company.registrationDate ?? 'Ukjent'}</dd>
-                    </dl>
+                        </span> <br/>
+                        <strong>Kommune: </strong>
+                        <span>{company.address.municipality}</span> <br/>
+                        <strong>Registered: </strong>
+                        <span>{company.registrationDate ?? 'Ukjent'}</span> <br/>
+                    </div>
                 </>
             )}
 
