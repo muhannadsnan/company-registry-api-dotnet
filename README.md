@@ -7,14 +7,16 @@ A small ASP.NET Core Web API over Norwegian company data. It imports companies f
 (Brønnøysundregistrene) into PostgreSQL, and serves them through a search API protected by
 scoped bearer tokens.
 
-.NET 10 · ASP.NET Core (controllers) · Entity Framework Core · PostgreSQL · xUnit · Testcontainers · GitHub Actions
+.NET 10 · ASP.NET Core (controllers) · Entity Framework Core · PostgreSQL · xUnit · Testcontainers ·
+React + TypeScript (Vite) · Docker · GitHub Actions
 
 It is deliberately small. The aim is a finished, tidy core where each part can be explained,
 not a large feature list.
 
 ## Live demo
 
-https://company-registry-api-dotnet-latest.onrender.com/docs
+- Frontend: https://company-registry-api-dotnet-latest.onrender.com
+- API reference: https://company-registry-api-dotnet-latest.onrender.com/docs
 
 It runs on Render's free plan with a free Neon Postgres, both in Frankfurt. After 15 minutes
 without traffic it goes to sleep, so the first request can take up to a minute.
@@ -61,6 +63,12 @@ Brreg's municipality filter matches the postal address as well as the business a
 few imported companies have their business address in another municipality.
 
 Interactive API reference: http://localhost:5080/docs (development only; paste the token into the auth field).
+
+Frontend, in a second terminal (Node 24). Vite proxies `/api` and `/connect` to the API on 5080:
+
+```bash
+cd web && npm install && npm run dev               # http://localhost:5173
+```
 
 Tests: `dotnet test`. Docker must be running, because the integration tests start their own Postgres.
 
@@ -175,14 +183,17 @@ header is the same idea at a size that fits this project.
 
 One GitHub Actions workflow, on every push:
 
-1. **CI:** check formatting, scan NuGet packages for known vulnerabilities, build with warnings
-   as errors, fail if an entity changed without a migration, then run all tests.
-2. **CD:** only on `main`, and only if every step above passed. Build a Docker image, push it to
+1. **CI, backend:** check formatting, scan NuGet packages for known vulnerabilities, build with
+   warnings as errors, fail if an entity changed without a migration, then run all tests.
+2. **CI, frontend** (in parallel): `npm ci`, ESLint, `npm audit`, then a type-checked production build.
+3. **CD:** only on `main`, and only if both CI jobs passed. Build a Docker image, push it to
    GitHub Container Registry tagged with the commit SHA, and call Render's deploy hook with that
    exact tag. Render pulls the image and switches over once `/health` answers.
 
-The image is a two-stage build: the SDK image compiles, and the runtime image carries only the
-published app and runs as a non-root user. All configuration comes from environment variables
+The image is a three-stage build: Node builds the React app, the .NET SDK compiles the API, and the
+runtime image carries only the published API plus the built frontend in `wwwroot`, running as a
+non-root user. ASP.NET Core serves the frontend's files and sends React routes such as
+`/companies/912855414` to `index.html`, so the site and the API share one origin and need no CORS. All configuration comes from environment variables
 (`ConnectionStrings__Companies`, `Auth__SigningKey`, …), so the same image runs locally and in
 the cloud. The same pattern on Azure would be Azure Container Registry plus Container Apps or
 App Service.
@@ -199,6 +210,7 @@ src/CompanyRegistry.Api/
   Auth/                 Scopes and policies, AuthOptions, DevTokenIssuer
   Infrastructure/       Correlation id middleware, OpenAPI bearer scheme
 tests/CompanyRegistry.Tests/
+web/                    React + TypeScript frontend (Vite): src/api.ts and src/page/
 ```
 
 ## Not done here

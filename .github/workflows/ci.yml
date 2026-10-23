@@ -46,9 +46,36 @@ jobs:
           name: test-results
           path: test-results
 
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check for vulnerable packages
+        run: npm audit --audit-level=high
+
+      # Type-checks with tsc, then builds the production bundle.
+      - name: Build
+        run: npm run build
+
   # CD: only for pushes to main, and only after every check and test above has passed.
   deploy:
-    needs: build-and-test
+    needs: [build-and-test, frontend]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

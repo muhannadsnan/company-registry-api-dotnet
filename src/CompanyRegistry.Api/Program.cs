@@ -76,6 +76,16 @@ var app = builder.Build();
 app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseExceptionHandler();
 app.UseStatusCodePages();
+
+// The React frontend, when it has been built into wwwroot (the Docker image does that).
+// Locally the Vite dev server serves it instead, so there is nothing to serve here.
+var hasFrontend = app.Environment.WebRootFileProvider.GetFileInfo("index.html").Exists;
+if (hasFrontend)
+{
+    app.UseDefaultFiles();
+    app.UseStaticFiles();
+}
+
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -92,6 +102,13 @@ if (app.Configuration.GetValue<bool>("Docs:Enabled"))
             o.CustomCss = ".explore-scalar, .generate-sdk-button, .selected-client-action.scalar-button-gradient { display: none !important; }";
         })
         .AllowAnonymous();
+}
+
+if (hasFrontend)
+{
+    // Paths like /companies/912855414 are React routes, so they get the app's index.html.
+    // Unknown /api and /connect paths are left alone and still answer 404.
+    app.MapFallbackToFile("{*path:regex(^(?!api/|connect/).*$)}", "index.html").AllowAnonymous();
 }
 
 if (app.Configuration.GetValue<bool>("Database:MigrateOnStartup"))
