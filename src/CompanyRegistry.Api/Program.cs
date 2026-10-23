@@ -107,8 +107,9 @@ if (app.Configuration.GetValue<bool>("Docs:Enabled"))
 if (hasFrontend)
 {
     // Paths like /companies/912855414 are React routes, so they get the app's index.html.
-    // Unknown /api and /connect paths are left alone and still answer 404.
-    app.MapFallbackToFile("{*path:regex(^(?!api/|connect/).*$)}", "index.html").AllowAnonymous();
+    // "nonfile" skips paths with a file extension, so /assets/*.js still reach the static files;
+    // the regex leaves unknown /api and /connect paths alone.
+    app.MapFallbackToFile("{*path:nonfile:regex(^(?!api/|connect/).*$)}", "index.html").AllowAnonymous();
 }
 
 if (app.Configuration.GetValue<bool>("Database:MigrateOnStartup"))
