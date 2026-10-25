@@ -19,7 +19,7 @@ public class CompaniesController(AppDbContext db) : ControllerBase
         new ("974760673", "BrønnøysundRegistrene", "ORGL"),
     ]; */
 
-    [HttpGet]
+    /* [HttpGet]
     // public IEnumerable<CompanyDto> GetAll() => Companies;
     public async Task<List<CompanyDto>> GetAll(CancellationToken ct)
     {
@@ -29,8 +29,34 @@ public class CompaniesController(AppDbContext db) : ControllerBase
             .Take(100)
             .Select(c => new CompanyDto(c.Orgnr, c.Name, c.OrgForm, c.RegistrationDate))
             .ToListAsync(ct);
-    }
+    } */
 
+    [HttpGet]
+    public async Task<PageResult<CompanyDto>> Search([FromQuery] CompanySearchQuery query, CancellationToken ct)
+    {
+        IQueryable<Company> companies = db.Companies.AsNoTracking();
+
+        if (!string.IsNullOrWhiteSpace(query.Name))
+        {
+            companies = companies.Where(c => EF.Functions.ILike(c.Name, $"%{query.Name}%"));
+        }
+        if (!string.IsNullOrWhiteSpace(query.OrgForm))
+        {
+            var orgForm = query.OrgForm.Trim().ToUpperInvariant();
+            companies = companies.Where(c => c.OrgForm == orgForm);
+        }
+
+        var total = await companies.CountAsync(ct);
+        var items = await companies
+            .OrderBy(c => c.Name)
+            .Skip((query.Page - 1) * query.PageSize)
+            .Take(query.PageSize)
+            .Select(c => new CompanyDto(c.Orgnr, c.Name, c.OrgForm, c.RegistrationDate))
+            .ToListAsync(ct);
+
+        return new PageResult<CompanyDto>(items, query.Page, query.PageSize, total);
+    }
+    
     [HttpGet("{orgnr}")]
     // public ActionResult<CompanyDto> GetByOrgnr(string orgnr)
     public async Task<ActionResult<CompanyDto>> GetByOrgnr(string orgnr, CancellationToken ct)
