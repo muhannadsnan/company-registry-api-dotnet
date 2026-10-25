@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Practice.Api.Data;
 using Practice.Api.Contracts;
+using Practice.Api.Domain;
 
 namespace Practice.Api.Controllers;
 
@@ -61,6 +62,14 @@ public class CompaniesController(AppDbContext db) : ControllerBase
     // public ActionResult<CompanyDto> GetByOrgnr(string orgnr)
     public async Task<ActionResult<CompanyDto>> GetByOrgnr(string orgnr, CancellationToken ct)
     {
+        if (!Orgnr.IsValid(orgnr))
+        {
+            return Problem(
+                statusCode: StatusCodes.Status400BadRequest,
+                title: "Invalid Org number",
+                detail: "An organisation number is nine digits with a valid MOD11 check digit."
+            );
+        }
         // var company = Companies.FirstOrDefault(c => c.Orgnr == orgnr);
         var company = await db.Companies
             .AsNoTracking()
