@@ -17,6 +17,8 @@ builder.Services.AddHttpClient<BrregClient>(http =>
     http.DefaultRequestHeaders.UserAgent.ParseAdd("practice-api/1.0");
 })
 .AddStandardResilienceHandler();
+builder.Services.AddScoped<CompanyImporter>();
+
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
 
