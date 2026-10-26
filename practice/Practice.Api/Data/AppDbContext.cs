@@ -5,6 +5,7 @@ namespace Practice.Api.Data;
 public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(options)
 {
     public DbSet<Company> Companies => Set<Company>();
+    public DbSet<ImportRun> ImportRuns => Set<ImportRun>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -14,6 +15,11 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             company.Property(c => c.Orgnr).HasMaxLength(9).IsFixedLength();
             company.Property(c => c.Name).HasMaxLength(500);
             company.Property(c => c.OrgForm).HasMaxLength(10);
+        });
+
+        modelBuilder.Entity<ImportRun>( run =>
+        {
+            run.Property(r => r.Status).HasConversion<string>().HasMaxLength(20);
         });
     }
 }
