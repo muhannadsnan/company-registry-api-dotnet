@@ -20,7 +20,12 @@ public class ImportsController(AppDbContext db, ImportQueue queue) : ControllerB
         if (active)
             return Problem(statusCode: StatusCodes.Status409Conflict, title: "An import is already queued or running");
 
-        var run = new ImportRun { Status = ImportStatus.Queued, QueuedAt = DateTimeOffset.UtcNow };
+        var run = new ImportRun 
+        {
+            Status = ImportStatus.Queued, 
+            QueuedAt = DateTimeOffset.UtcNow,
+            CorrelationId = HttpContext.TraceIdentifier 
+        };
         db.ImportRuns.Add(run);
         await db.SaveChangesAsync(ct);
         await queue.EnqueueAsync(run.Id, ct);

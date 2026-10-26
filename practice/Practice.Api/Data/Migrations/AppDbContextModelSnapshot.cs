@@ -61,6 +61,10 @@ namespace Practice.Api.Data.Migrations
 
                     NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
 
+                    b.Property<string>("CorrelationId")
+                        .HasColumnType("text")
+                        .HasColumnName("correlation_id");
+
                     b.Property<string>("Error")
                         .HasColumnType("text")
                         .HasColumnName("error");

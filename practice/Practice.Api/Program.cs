@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
 using Practice.Api.Data;
 using Practice.Api.Import;
+using Practice.Api.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -31,6 +32,7 @@ builder.Services.AddHostedService<ImportWorker>();
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
+app.UseMiddleware<CorrelationIdMiddleware>();
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())

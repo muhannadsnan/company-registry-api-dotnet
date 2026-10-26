@@ -10,6 +10,7 @@ public enum ImportStatus
 
 public class ImportRun
 {
+    public string? CorrelationId { get; set; }
     public long Id { get; set; }
     public ImportStatus Status { get; set; }
     public DateTimeOffset QueuedAt { get; set; }

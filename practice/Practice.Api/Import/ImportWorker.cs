@@ -23,6 +23,9 @@ public class ImportWorker(
                 continue;
             }
 
+            using var logScope = logger.BeginScope(
+                "ImportRun {RunId}, CorrelationId {CorrelationId}", run.Id, run.CorrelationId);
+
             run.Status = ImportStatus.Running;
             run.StartedAt = DateTimeOffset.UtcNow;
             await db.SaveChangesAsync(stoppingToken);
