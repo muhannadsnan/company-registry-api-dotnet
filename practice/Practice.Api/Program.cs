@@ -9,6 +9,10 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers()
     .AddJsonOptions(o => o.JsonSerializerOptions.Converters.Add(new JsonStringEnumConverter()));
+builder.Services.AddAuthentication().AddJwtBearer();
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("companies.read", p => p.RequireClaim("scope", "companies.read"))
+    .AddPolicy("companies.import", p => p.RequireClaim("scope", "companies.import"));
 builder.Services.AddDbContext<AppDbContext>(options => options
     .UseNpgsql(builder.Configuration.GetConnectionString("Practice"))
     .UseSnakeCaseNamingConvention()
@@ -36,6 +40,7 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
+app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();

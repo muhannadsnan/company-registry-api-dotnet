@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Practice.Api.Import;
 using Practice.Api.Data;
@@ -8,6 +9,7 @@ namespace Practice.Api.Controllers;
 
 [ApiController]
 [Route("api/imports")]
+[Authorize(Policy = "companies.import")]
 public class ImportsController(AppDbContext db, ImportQueue queue) : ControllerBase
 {
     [HttpPost]

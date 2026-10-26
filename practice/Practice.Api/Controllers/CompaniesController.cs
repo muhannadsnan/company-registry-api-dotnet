@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Practice.Api.Data;
 using Practice.Api.Contracts;
@@ -11,6 +12,7 @@ namespace Practice.Api.Controllers;
 
 [ApiController]
 [Route("api/companies")]
+[Authorize(Policy = "companies.read")]
 // public class CompaniesController : ControllerBase
 public class CompaniesController(AppDbContext db) : ControllerBase
 {

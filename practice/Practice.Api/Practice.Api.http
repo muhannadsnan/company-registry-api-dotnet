@@ -1,6 +1,26 @@
-@Practice.Api_HostAddress = http://localhost:5010
+@base = http://localhost:5010
+@reader = {{$dotenv READER_TOKEN}}
+@importer = {{$dotenv IMPORTER_TOKEN}}
 
-GET {{Practice.Api_HostAddress}}/weatherforecast/
-Accept: application/json
+### Search companies (reader)
+GET {{base}}/api/companies?name=bil&orgForm=AS
+Authorization: Bearer {{reader}}
 
-###
+### One company (reader)
+GET {{base}}/api/companies/912855414
+Authorization: Bearer {{reader}}
+
+### No token: expect 401
+GET {{base}}/api/companies
+
+### Reader tries to import: expect 403
+POST {{base}}/api/imports
+Authorization: Bearer {{reader}}
+
+### Start an import (importer): expect 202
+POST {{base}}/api/imports
+Authorization: Bearer {{importer}}
+
+### Import history (importer)
+GET {{base}}/api/imports
+Authorization: Bearer {{importer}}
