@@ -2,6 +2,7 @@
 
 Thirteen core concepts of ASP.NET Core and EF Core, as used in this repo. For each: what it is, an analogy
 from PHP/CodeIgniter, Vue/Nuxt or Node, where it appears in the code, and a common question about it.
+Each section ends with **In my words**: my own answer, corrected after an explain-back review.
 
 ---
 
@@ -27,6 +28,13 @@ The container sees it needs a `AppDbContext` and passes one in.
 service into a singleton is a **captive dependency**: one DbContext would live forever and grow. So the
 worker creates a fresh scope per import run.
 
+**In my words:**
+> The DI container builds it. I register services in Program.cs with a lifetime, and the container passes them into
+> constructors. Scoped means one per request, so each request gets a fresh DbContext. Singleton means one shared
+> instance, created the first time something asks for it, like the import queue that the controller writes to and the
+> worker reads from. A hosted service like the worker starts with the app and lives forever, so it creates its own
+> scope per run to get a fresh DbContext.
+
 ## 2. Middleware and the request pipeline
 
 **In short:** Every request passes through a chain of middleware in the order they're registered with `app.Use…`.
@@ -40,6 +48,12 @@ every later log line (including exceptions) carries the correlation id.
 
 **Common question:** *"What happens if you put `UseAuthorization` before `UseAuthentication`?"* → Authorization would run
 before anyone has read the token, so every user looks anonymous. Every protected endpoint gives 401.
+
+**In my words:**
+> Middleware is a chain of layers every request goes through, in the order I add them. Each one can act before and
+> after the next, or stop the request and answer itself, like auth returning 401. So order matters: authentication
+> must come before authorization, or no user is known yet. The correlation id goes first, so every later log line and
+> every response carries it, even when a later layer stops the request early.
 
 ## 3. async/await and Task
 
@@ -55,6 +69,13 @@ is passed down so a closed request or a stopping app cancels the database query 
 
 **Common question:** *"Why not `.Result` or `.Wait()`?"* → It blocks a thread while waiting (thread pool starvation
 under load), and can deadlock in some contexts. "Async all the way down."
+
+**In my words:**
+> await frees the thread while we wait for I/O like the database or an HTTP call. The thread is a waiter and the
+> database is the kitchen: the waiter doesn't stand at the kitchen door, but goes back to the pool and serves other
+> requests, so the server handles many more requests at once. Blocking with .Result holds a thread doing nothing, and
+> under load you run out of threads. Task is like a JS Promise. The CancellationToken is the "stop" signal: if the
+> client disconnects or the app shuts down, the query or HTTP call is cancelled instead of finishing for nobody.
 
 ## 4. EF Core: DbContext, DbSet, migrations, change tracking, AsNoTracking
 
@@ -77,6 +98,14 @@ run #2 reported 5568 unchanged, 0 updated.
 At that scale I'd do `INSERT … ON CONFLICT` via raw SQL or `COPY`, which is what a bulk import needs.
 EF Core 7+ also has `ExecuteUpdate`/`ExecuteDelete` for set-based updates (used in `ImportWorker`).
 
+**In my words:**
+> Change tracking means EF keeps a snapshot of what it loaded, so at SaveChanges it updates only the columns that
+> changed, and writes nothing if nothing changed. The importer needs that for its upsert. Reads don't change anything,
+> so AsNoTracking skips the snapshot. A migration is one schema change, generated from my entities, and the history
+> table records which ones a database has run. An applied migration never runs again on that database, so editing it
+> means my existing databases and fresh ones quietly differ, and forcing it to rerun conflicts with the existing tables.
+> Changes always go in a new migration.
+
 ## 5. LINQ and IQueryable: when does the query hit the database?
 
 **In short:** `IQueryable<T>` is a query that hasn't run yet. `Where`, `OrderBy`, `Select` just build an expression
@@ -92,6 +121,12 @@ send exactly two SQL statements.
 `IEnumerable` runs in memory in C#. Calling `.ToList()` too early, then filtering, means loading the whole
 table and filtering in C#, a classic performance bug.
 
+**In my words:**
+> LINQ on an IQueryable only builds the query. Each Where and OrderBy adds to the SQL, and nothing runs until I call
+> ToListAsync or CountAsync, like ->get() in Laravel. I filter and sort first, then Skip and Take for the page, and
+> Select into the DTO last: the DTO is built by a constructor, and EF can't see inside it to map its properties back
+> to columns, so it can't translate steps that come after it.
+
 ## 6. Minimal APIs vs controllers
 
 **In short:** Controllers are classes grouping related endpoints with attributes for routes and auth. Minimal APIs map
@@ -102,6 +137,12 @@ lambdas directly: `app.MapGet("/x", handler)`. Same runtime, same DI, same auth;
 and Microsoft's newer default; this repo uses them for `/health` and `/docs`.
 
 **Analogy:** Controllers = CodeIgniter controllers. Minimal APIs = Nuxt `server/api/*.ts` handlers.
+
+**In my words:**
+> Same engine, two styles. A minimal API maps each endpoint with a lambda, like Express. Controllers are classes that
+> inherit ControllerBase and group related endpoints, and the [ApiController] attribute gives automatic model
+> validation and 400 responses. Both share the same DI, middleware and auth. New templates default to minimal APIs.
+> I chose controllers because they keep a growing API organised and most existing .NET codebases use them.
 
 ## 7. Records, nullable reference types, `required`
 
@@ -117,6 +158,15 @@ and Microsoft's newer default; this repo uses them for `/health` and `/docs`.
 **In repo:** `Contracts/`, `Import/BrregModels.cs` (everything from Brreg is `?`, because external data is
 untrusted), `Data/Company.cs`.
 
+**In my words:**
+> A record is a data type with value equality: two records with the same values are equal (like PHP ==), while two
+> class instances are equal only if they are the same object. It's filled once through its constructor and is
+> read-only after that; `with` makes a changed copy. That fits a DTO: a contract I build and send, never change. The
+> entity is a class because EF tracks changes by modifying it, and its identity is its key, not its values.
+> `?` and `required` are compile-time checks: `?` marks what may be null so the compiler warns where a null could slip
+> through, and `required` makes it a build error to create the object without that field. EF also uses them for
+> NULL / NOT NULL columns. Checking the caller's input at runtime is a different tool: validation attributes like [Range].
+
 ## 8. IHttpClientFactory, and why not `new HttpClient()`
 
 **In short:** `new HttpClient()` per call leaks sockets (they stay in TIME_WAIT). A single static one never sees DNS
@@ -128,6 +178,13 @@ and resilience (retries, timeouts, circuit breaker) in one place.
 
 **Common question:** *"What does the resilience handler do?"* → Retries transient failures (5xx, timeouts) with exponential backoff and
 jitter, a per-attempt and a total timeout, and a circuit breaker that stops hammering a service that is down. It's built on Polly.
+
+**In my words:**
+> new HttpClient() per call exhausts sockets under load, because closed sockets linger for minutes. One static client
+> forever never notices DNS changes. IHttpClientFactory pools connections and recycles them, which fixes both. A typed
+> client like BrregClient also keeps the base address, headers and resilience in one place in Program.cs. The standard
+> resilience handler adds retries with backoff for temporary errors, timeouts, and a circuit breaker that stops calling
+> a failing service for a while.
 
 ## 9. BackgroundService / IHostedService: the cron equivalent
 
@@ -143,6 +200,15 @@ jitter, a per-attempt and a total timeout, and a circuit breaker that stops hamm
 get three imports. Fixes: a database lock or lease, a real message queue, or run the job outside the API
 (Azure Function, Kubernetes CronJob). This project is single-instance by design.
 
+**In my words:**
+> A BackgroundService is a hosted service that starts with the app and lives in the same process, the .NET version
+> of a cron job or a queue worker. The controller writes a run id with `queue.EnqueueAsync(run.Id, ct)`, and the worker,
+> awaiting `foreach` over `queue.ReadAllAsync()`, picks it up and runs the import in its own DI scope. Awaiting the
+> channel holds no thread while the queue is empty. The queue lives in memory, so if the app stops, queued run ids are
+> lost and the running import stays "Running". Pages already saved stay, and the upsert makes a re-run safe. The
+> defence is to mark Running and Queued runs as Abandoned on startup. For more than one instance I'd move the queue to
+> the database or a message broker.
+
 ## 10. Configuration and options: appsettings.json, IOptions<T>
 
 **In short:** Configuration is layered: `appsettings.json` → `appsettings.{Environment}.json` → environment variables →
@@ -154,6 +220,15 @@ to start with invalid config.
 
 **In repo:** `appsettings*.json`, `Import/ImportOptions.cs`, `Auth/AuthOptions.cs`. Env var override: `Import__PageSize=200`
 (double underscore = section separator).
+
+**In my words:**
+> Configuration is layered: appsettings.json, then the environment's appsettings file, then user secrets in
+> Development, then environment variables, then command-line arguments. The later source wins, so one image runs
+> everywhere and only the environment changes. .NET doesn't read .env files; the host sets real environment variables
+> before the app starts. Locally, secrets live in user secrets, outside the repo. In production they come from the
+> host's environment variables, or from a vault like Key Vault that the app reads at startup, which adds rotation in
+> one place, an audit log and access per secret. Never in git, appsettings.json or the image. I bind sections to typed
+> options classes and validate them on start, so a missing setting stops the app immediately.
 
 ## 11. Authentication vs authorisation, policies, claims, scopes
 
@@ -175,6 +250,14 @@ the `AddJwtBearer` configuration only; policies and controllers stay the same.
 **Common question:** *"Why `MapInboundClaims = false`?"* → By default .NET renames JWT claims to long legacy URIs
 (`sub` → `http://schemas.xmlsoap.org/.../nameidentifier`). Turning it off keeps claim names as they are in the token.
 
+**In my words:**
+> Authentication is who you are: the API validates the JWT's signature, issuer, audience and expiry. If that fails,
+> 401. Authorisation is what you may do: a policy checks the token's claims. A claim is any fact in the token, like
+> client_id or exp, and the scope claim lists the permissions. The import endpoint's policy requires the
+> companies.import scope, so a valid reader token gets 403. A JWT is signed, not encrypted: anyone can read the claims,
+> but nobody can change them without breaking the signature. Maskinporten works the same way: it issues the token with
+> the scopes, and the API checks them.
+
 ## 12. ILogger<T> and structured logging
 
 **In short:** `ILogger<CompanyImporter>` is injected; the `T` becomes the log category. You log with a **message
@@ -187,6 +270,13 @@ filter on.
 
 **Common question:** *"Why not `$"Rejected {orgnr}"`?"* → Interpolation produces a finished string: the field is lost,
 and the string is built even when that log level is off.
+
+**In my words:**
+> With a message template, the values stay as named fields, so a log tool can filter, group and sum on them, like all
+> imports where Rejected is above zero. String interpolation turns them into plain text, which only regex can search.
+> JSON is just one way to print those fields. The correlation id is one of them, attached to every line of a request,
+> so when a user reports an error with that id, I find exactly that request's logs among all the concurrent ones, even
+> into the background job. That is traceability.
 
 ## 13. xUnit: facts, theories, WebApplicationFactory
 
@@ -202,6 +292,14 @@ without a running Nginx.
 
 **In repo:** `tests/CompanyRegistry.Tests/`. Testcontainers starts a real Postgres in Docker, so `ILIKE` and migrations are
 tested against the real database, not an in-memory fake.
+
+**In my words:**
+> A Fact is a single test. A Theory runs the same test for each InlineData row, for when only the data changes. Unit
+> tests check one piece of logic, like MOD11, across all its edge cases in milliseconds. Integration tests boot the
+> real app with WebApplicationFactory against a real Postgres container from Testcontainers, and catch what unit tests
+> can't: routing, auth, middleware, EF and SQL, and migrations. So I put edge cases in unit tests and one integration
+> test per behaviour to prove it's wired up (the test pyramid). A test only checks what it calls, so an endpoint
+> without a test is untested, and a test must fail for the reason its name says.
 
 ---
 
