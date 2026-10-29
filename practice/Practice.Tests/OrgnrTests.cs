@@ -14,10 +14,10 @@ public class OrgnrTests
     }
 
     [Theory]
-    [InlineData("92360917")] // wrong check digit
+    [InlineData("923609017")] // wrong check digit (Equinor is 923609016)
     [InlineData("12345678")] // too short
     [InlineData("1234567890")] // too long
-    [InlineData("9236091A")] // not a digit
+    [InlineData("92360901A")] // not a digit
     [InlineData("")]
     [InlineData(null)]
     public void Rejects_invalid_values(string? value)
