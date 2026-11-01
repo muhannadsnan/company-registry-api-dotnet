@@ -1,4 +1,17 @@
 @base = http://localhost:5010
+
+# @name login
+POST {{base}}/api/auth/login
+Content-Type: application/json
+
+{ "username": "admin", "password": "admin-pass" }
+
+### Search with the token from the login above
+GET {{base}}/api/companies?name=bil
+Authorization: Bearer {{login.response.body.$.accessToken}}
+
+
+
 @reader = {{$dotenv READER_TOKEN}}
 @importer = {{$dotenv IMPORTER_TOKEN}}
 

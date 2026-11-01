@@ -25,6 +25,7 @@ public class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         builder.UseEnvironment("Testing");
         builder.UseSetting("ConnectionStrings:Practice", _db.GetConnectionString());
+        builder.UseSetting("Jwt:SigningKey", "practice-test-signing-key-that-is-long-enough"); // a test signing key here
 
         builder.ConfigureTestServices(services =>
             services.PostConfigure<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme, options =>

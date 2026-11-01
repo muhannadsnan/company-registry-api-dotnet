@@ -74,7 +74,7 @@ function ImportsPage() {
             <h2>History</h2>
             <table>
                 <thead>
-                    <tr>
+                    <tr style={{'background': '#222'}}>
                         <th>Run</th>
                         <th>Status</th>
                         <th>Inserted</th>
@@ -86,7 +86,7 @@ function ImportsPage() {
                 </thead>
                 <tbody>
                     {history.map((r) => (
-                        <tr key={r.id}>
+                        <tr key={r.id} className={r.status == 'Failed' ? 'error' : ''}>
                             <td>{r.id}</td>
                             <td>{r.status}</td>
                             <td>{r.inserted}</td>

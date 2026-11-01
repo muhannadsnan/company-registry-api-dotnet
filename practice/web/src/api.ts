@@ -1,3 +1,6 @@
+import { clearSession, loadSession, type Session } from './auth/session'
+
+
 export type CompanyDto = {
     orgnr: string
     name: string
@@ -14,7 +17,7 @@ export type PageResult<T> = {
 
 export async function searchCompany(name: string, page = 1): Promise<PageResult<CompanyDto>> {
     const params = new URLSearchParams({ name, page: String(page) })
-    const response = await fetch(`/api/companies?${params}`)
+    const response = await apiFetch(`/api/companies?${params}`)
     if (!response.ok) {
         throw new Error(`HTTP ${response.status}`)
     }
@@ -22,7 +25,7 @@ export async function searchCompany(name: string, page = 1): Promise<PageResult<
 }
 
 export async function getCompany(orgnr: string): Promise<CompanyDto> {
-    const response = await fetch(`/api/companies/${encodeURIComponent(orgnr)}`)
+    const response = await apiFetch(`/api/companies/${encodeURIComponent(orgnr)}`)
     if (!response.ok) throw new ApiError(response.status)
     return response.json()
 }
@@ -57,7 +60,7 @@ export type ImportRun = {
 }
 
 export async function startImport(): Promise<ImportRun> {
-    const response = await fetch('/api/imports', { method: 'POST' })
+    const response = await apiFetch('/api/imports', { method: 'POST' })
     if (!response.ok) {
         throw new ApiError(response.status)
     }
@@ -65,7 +68,7 @@ export async function startImport(): Promise<ImportRun> {
 }
 
 export async function getImport(id: number): Promise<ImportRun> {
-    const response = await fetch(`/api/imports/${id}`)
+    const response = await apiFetch(`/api/imports/${id}`)
     if (!response.ok) {
         throw new ApiError(response.status)
     }
@@ -73,7 +76,37 @@ export async function getImport(id: number): Promise<ImportRun> {
 }
 
 export async function listImports(): Promise<ImportRun[]> {
-    const response = await fetch('/api/imports')
+    const response = await apiFetch('/api/imports')
+    if (!response.ok) {
+        throw new ApiError(response.status)
+    }
+    return response.json()
+}
+
+
+
+
+// fetch, plus the logged-in user's token. A 401 means the token is missing or expired: log out.
+async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
+    const session = loadSession()
+    const headers = new Headers(init?.headers)
+    if (session) {
+        headers.set('Authorization', `Bearer ${session.accessToken}`)
+    }
+    const response = await fetch(url, { ...init, headers })
+    if (response.status === 401) {
+        clearSession()
+        window.location.assign('/login')
+    }
+    return response
+}
+
+export async function login(username: string, password: string): Promise<Session> {
+    const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+    })
     if (!response.ok) {
         throw new ApiError(response.status)
     }
