@@ -1,7 +1,14 @@
-# React + TypeScript: what I built and learned (22 Oct 2026)
+# React + TypeScript: what I built and learned
 
-A small frontend for my .NET API: a company search page and a company page, in `web/`.
-Stack: Vite 8 · React 19 · TypeScript · react-router · ESLint.
+Two frontends, both typed by me with an AI tutor guiding the steps:
+
+- **Part 1 (22 Oct 2026):** `web/`, the real project's frontend: a company search page and a company page.
+  Stack: Vite 8 · React 19 · TypeScript · react-router · ESLint.
+- **Part 2 (29 Oct – 1 Nov 2026):** `practice/web/`, a second frontend for my practice API, built in 11
+  steps: paging, URL state, a layout, an import page that polls, and a login with route guards.
+  Stack: Vite 8 · React 19.3 · TypeScript 7 · react-router · Oxlint · Prettier.
+
+# Part 1: `web/`
 
 ---
 
@@ -385,8 +392,222 @@ Rule: every value from the component that the effect *uses* goes in the list. ES
 
 ---
 
-## 7. Next
+## 7. Next for `web/`
 
 1. ~~Build the frontend into the same Docker image, served by ASP.NET Core; add frontend lint + build to CI.~~ Done 23 Oct (see CICD-NOTES.md).
-2. Pagination: `page` state + `useEffect(…, [name, page])`, Previous/Next buttons.
+2. Pagination: `page` state + `useEffect(…, [name, page])`, Previous/Next buttons. (Done in Part 2's practice app.)
 3. Clean-up: delete `App.tsx`/`App.css`, one UI language, the "Kommune"/"Poststed" column.
+
+---
+
+# Part 2: `practice/web/` (29 Oct – 1 Nov 2026)
+
+## 8. The steps
+
+| Step | What I built | The main idea |
+|---|---|---|
+| 1 | Created the app | `index.html` → `main.tsx` mounts `<App />` into `#root` |
+| 2 | Dev proxy that added the token, first `fetch` | The browser never saw the token (the BFF idea). Later removed |
+| 3 | Typed API client `api.ts` | TS types mirror the C# records; JSON is camelCase |
+| 4 | Search form with loading and error states | Two states: `name` (the input) and `query` (what was searched) |
+| 5 | Paging with my own `Paginator` component | Props down, a callback up |
+| 6 | Router and a company page | `useParams`, `ApiError` with the status code for 400/404 |
+| 7 | Search kept in the URL | `useSearchParams`: refresh, Back and shared links keep the search |
+| 8 | Layout route | `<Outlet />` = Razor's `@RenderBody()`, Vue's `<slot />` |
+| 9 | Import page that polls the background job | `setInterval` in an effect, **with cleanup** |
+| 10 | (backend) `users` table with hashed passwords | |
+| 11 | Login, auth context, route guard, automatic logout | Context = Vue's provide/inject |
+
+**Commands new in Part 2:**
+
+```bash
+npm create vite@latest web -- --template react-ts --no-interactive   # no questions asked
+npm run lint           # the template now uses Oxlint, not ESLint
+npm run format         # Prettier: 4 spaces, no semicolons, single quotes (.prettierrc.json)
+```
+
+Format on save is set in `.vscode/settings.json` with `"prettier.requireConfig": true`, so only folders
+with a Prettier config are formatted (the real `web/` keeps its 2 spaces).
+
+## 9. The code worth remembering
+
+### Props and a callback: `Paginator.tsx`
+
+```tsx
+type PaginatorProps = {
+    page: number
+    totalPages: number
+    onPageChange: (page: number) => void
+}
+
+function Paginator({ page, totalPages, onPageChange }: PaginatorProps) {
+    return (
+        <nav className="paginator">
+            <button disabled={page <= 1} onClick={() => onPageChange(page - 1)}>Previous</button>
+            <span>Page {page} of {totalPages}</span>
+            <button disabled={page >= totalPages} onClick={() => onPageChange(page + 1)}>Next</button>
+        </nav>
+    )
+}
+```
+
+- **Props** are the component's typed parameters (Vue's `defineProps`).
+- **`onPageChange`** is Vue's `emit`: the child doesn't change the page, it *asks* the parent to.
+  Data flows down; changes flow up through callbacks.
+
+### State in the URL: `SearchPage.tsx`
+
+```tsx
+const [searchParams, setSearchParams] = useSearchParams()
+const query = searchParams.get('name') ?? ''
+const page = Number(searchParams.get('page')) || 1      // missing or "abc" → 1
+
+function handlePageChange(newPage: number) {
+    const params = new URLSearchParams(searchParams)     // copy, so `name` stays
+    params.set('page', String(newPage))
+    setSearchParams(params)                               // = router.push({ query })
+}
+```
+
+- `query` and `page` are **read from the URL** on every render; the URL is the only place they live.
+- Changing the URL re-renders, the effect sees `[query, page]` change, and fetches. The effect itself
+  didn't change when I moved the state.
+- `<Link to=… state={{ search: searchParams.toString() }}>` carries the search to the company page
+  invisibly, so "← Back to search" returns to it.
+
+### An effect with cleanup: polling on `ImportsPage.tsx`
+
+```tsx
+useEffect(() => {
+    if (!isActive || runId === undefined) {
+        return
+    }
+    const timer = setInterval(async () => {
+        setRun(await getImport(runId))
+    }, 1000)
+    return () => clearInterval(timer)           // the cleanup
+}, [isActive, runId])
+```
+
+- React runs the cleanup **before the effect runs again** and **when the component disappears**
+  (Vue's `onUnmounted`, attached to the effect).
+- The polling stops by itself: the status becomes `Succeeded`, `isActive` turns false, React cleans up the
+  timer, and the effect returns early.
+- Without the cleanup, leaving the page mid-import leaves a timer running forever. StrictMode's double run
+  in development exists to expose exactly this.
+- This is the client half of the API's **202 Accepted** pattern: "accepted, here's the run id, poll it".
+
+### Layout route and nested routes: `App.tsx`
+
+```tsx
+<Routes>
+    <Route element={<Layout />}>                         {/* draws header/footer + <Outlet /> */}
+        <Route path="/login" element={<LoginPage />} />
+        <Route element={<RequireAuth />}>                {/* the guard: <Outlet /> or redirect */}
+            <Route path="/" element={<SearchPage />} />
+            <Route path="/companies/:orgnr" element={<CompanyPage />} />
+            <Route path="/import" element={<ImportsPage />} />
+        </Route>
+        <Route path="*" element={<p>Page not found.</p>} />
+    </Route>
+</Routes>
+```
+
+- A `<Route>` **without a path** matches no URL itself; it wraps the routes inside it.
+- The layout stays mounted while pages change, so its state survives navigation.
+
+### Login: `src/auth/`
+
+| File | Role | Vue equivalent |
+|---|---|---|
+| `session.ts` | Load, save and clear the session in `localStorage`; an expired one counts as none | |
+| `AuthContext.ts` | `createContext` + my custom hook `useAuth()` | `inject()` |
+| `AuthProvider.tsx` | Holds `session` state, `login`, `logout`, and the expiry timer; wraps the app | `provide()` |
+| `RequireAuth.tsx` | `session ? <Outlet /> : <Navigate to="/login" replace />` | `router.beforeEach` |
+
+```tsx
+// AuthProvider.tsx: log out by itself when the token expires
+useEffect(() => {
+    if (!session) {
+        return
+    }
+    const msLeft = new Date(session.expiresAt).getTime() - Date.now()
+    const timer = setTimeout(logout, msLeft)
+    return () => clearTimeout(timer)
+}, [session])
+
+return <AuthContext value={{ session, login, logout }}>{children}</AuthContext>
+```
+
+```ts
+// api.ts: every API call goes through this
+async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
+    const session = loadSession()
+    const headers = new Headers(init?.headers)
+    if (session) {
+        headers.set('Authorization', `Bearer ${session.accessToken}`)
+    }
+    const response = await fetch(url, { ...init, headers })
+    if (response.status === 401) {          // token missing or expired
+        clearSession()
+        window.location.assign('/login')
+    }
+    return response
+}
+```
+
+- **`children`** is whatever sits between `<AuthProvider>` and `</AuthProvider>` (Vue's default `<slot />`).
+- **`apiFetch`** is the one place that knows about tokens, like an axios interceptor. `login()` uses the
+  plain `fetch`, because a wrong password is also a 401 and must show a message, not redirect.
+- **Hooks before any early `return`.** React needs the same hooks in the same order on every render.
+- **Context and component in separate files:** a `.tsx` file should export only components, or hot
+  reload stops working for it (Oxlint's `only-export-components`).
+- **Hiding the Imports link is convenience, not security.** The API's policy is the real check (403).
+
+## 10. More Vue to React
+
+| Vue / Nuxt | React |
+|---|---|
+| `defineProps<{…}>()` | Typed props: `function X({ a, b }: XProps)` |
+| `emit('change', n)` | A callback prop: `onChange(n)` |
+| `provide()` / `inject()` | `<MyContext value={…}>` / `useContext(MyContext)` |
+| Default `<slot />` | `children` |
+| Layout `<slot />` / `<NuxtPage />` | `<Outlet />` in a layout route |
+| `route.query`, `router.push({ query })` | `useSearchParams()` |
+| `router-link-active` | `NavLink` adds the class `active` |
+| `router.beforeEach` guard | A guard component: `<Outlet />` or `<Navigate />` |
+| `onUnmounted` | The function returned from `useEffect` |
+| `:style="{ color: 'red' }"` | `style={{ color: 'red' }}` (object only, camelCase properties) |
+| `class="x"` | `className="x"` |
+
+## 11. Things I learned on the way
+
+- **`export default X`** is imported without braces (`import X from './X'`); **named exports** with
+  braces and the exact name (`import { searchCompany } from './api'`).
+- **StrictMode** in development renders every component twice and runs every effect twice, to catch
+  effects that aren't safe to repeat. A production build runs them once.
+- **React Developer Tools** (browser extension): the Components tab shows each component's props and
+  state, and lets me edit state live. State can't be changed from the console, because it's local to
+  the component function.
+- **`FormEvent` is deprecated** in React 19.3's types: use `SubmitEvent` for a form submit.
+- **A relative fetch URL** (`api/companies`) depends on the current page: on `/companies/123` it becomes
+  `/companies/api/companies`. Always start API URLs with `/`.
+- **`localStorage` is not a cookie.** It's never sent automatically (`apiFetch` adds the header), and
+  JavaScript can always read it, so an XSS bug could steal the token. An httpOnly cookie can't be read
+  by JavaScript; that's why production systems often prefer it, or a BFF.
+- **`window.location = x`, `.href = x` and `.assign(x)`** are the same; **`.replace(x)`** navigates
+  without adding a history entry.
+- **Types are a promise, not a check.** If a C# DTO changes, TypeScript doesn't know. Bigger projects
+  generate the TS types from the API's OpenAPI document (`openapi-typescript`, orval, Kiota, NSwag).
+
+## 12. Mistakes in Part 2
+
+| What happened | Lesson |
+|---|---|
+| `import { Paginator } from './Paginator'` | Braces look for a named export; `export default` is imported without them |
+| `` fetch(`api/companies?…`) `` worked on `/` but not on `/companies/…` | A relative URL resolves against the current page; start with `/` |
+| `Authorization: Bearer: …` for the importer token | One colon too many, so every `/api/imports` call was 401. Unused routes hide bugs |
+| `prompt('Start a new import?')` | `prompt` shows a text input and returns what was typed (`''` on an empty OK); `confirm` returns `true`/`false` |
+| The guarded group used `<Layout />` instead of `<RequireAuth />` | Nothing was guarded and the header appeared twice; the build also failed on the unused import |
+| The old nav line was left in `Layout` | Imports showed twice and Log out showed on the login page; wrap it in `{session && …}` |
+| Imports failed with "Could not load file or assembly System.Net.Http.Json" | An apt update replaced .NET 10.0.13 with 10.0.14 while the API was running; the first lazy load looked in a folder that no longer existed. Restart processes after a runtime update |
