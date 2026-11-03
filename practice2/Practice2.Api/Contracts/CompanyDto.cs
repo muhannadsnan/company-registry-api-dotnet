@@ -1,3 +1,3 @@
 namespace Practice2.Api.Contracts;
 
-public record CompanyDto(string Orgnr, string Name, string OrgForm);
+public record CompanyDto(string Orgnr, string Name, string OrgForm, DateOnly? RegistrationDate);
