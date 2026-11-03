@@ -10,12 +10,30 @@ namespace Practice2.Api.Controllers;
 public class CompaniesController(AppDbContext db) : ControllerBase
 {
     [HttpGet]
-    public async Task<List<CompanyDto>> Search(CancellationToken ct) =>
-        await db.Companies.AsNoTracking()
-                .OrderBy(c => c.Name)
-                .Take(20)
-                .Select(c => new CompanyDto(c.Orgnr, c.Name, c.OrgForm, c.RegistrationDate))
-                .ToListAsync(ct);
+    public async Task<PageResult<CompanyDto>> Search([FromQuery] CompanySearchQuery query, CancellationToken ct)
+    {
+        IQueryable<Company> companies = db.Companies.AsNoTracking();
+
+        if (!string.IsNullOrWhiteSpace(query.Name))
+        {
+            companies = companies.Where(c => EF.Functions.ILike(c.Name, $"%{query.Name}%"));
+        }
+        if (!string.IsNullOrWhiteSpace(query.OrgForm))
+        {
+            var orgForm = query.OrgForm.Trim().ToUpperInvariant();
+            companies = companies.Where(c => c.OrgForm == orgForm);
+        }
+
+        var total = await companies.CountAsync(ct);
+        var items = await companies
+            .OrderBy(c => c.Name)
+            .Skip((query.Page - 1) * query.PageSize)
+            .Take(query.PageSize)
+            .Select(c => new CompanyDto(c.Orgnr, c.Name, c.OrgForm, c.RegistrationDate))
+            .ToListAsync(ct);
+
+        return new PageResult<CompanyDto>(items, query.Page, query.PageSize, total);
+    }
 
     [HttpGet("{orgnr}")]
     public async Task<ActionResult<CompanyDto>> GetByOrgnr(string orgnr, CancellationToken ct)
