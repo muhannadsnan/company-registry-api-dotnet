@@ -1,4 +1,4 @@
-namespace Practice2.Api.Brreg;
+namespace Practice2.Api.Import;
 
 public class BrregClient(HttpClient http)
 {

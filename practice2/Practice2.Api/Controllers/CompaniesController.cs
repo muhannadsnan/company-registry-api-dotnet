@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Practice2.Api.Brreg;
+using Practice2.Api.Import;
 using Practice2.Api.Contracts;
 using Practice2.Api.Data;
 using Practice2.Api.Domain;
@@ -55,8 +55,4 @@ public class CompaniesController(AppDbContext db) : ControllerBase
         return company is null ? NotFound() : company;
     }
 
-
-    [HttpGet("brreg")]
-    public async Task<BrregPage> GetBrreg(BrregClient brreg, [FromQuery] int page, [FromQuery] int size, CancellationToken ct)
-        => await brreg.GetPageAsync(page, size, ct);
 }

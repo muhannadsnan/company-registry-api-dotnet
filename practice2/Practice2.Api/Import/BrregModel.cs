@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace Practice2.Api.Brreg;
+namespace Practice2.Api.Import;
 
 public record BrregEnhet(
     string? Organisasjonsnummer,

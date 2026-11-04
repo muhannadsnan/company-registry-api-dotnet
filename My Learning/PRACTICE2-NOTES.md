@@ -12,6 +12,7 @@ each part is there. The step list is in [PRACTICE-PLAN.md](PRACTICE-PLAN.md); th
 | 4 | Search with filters and paging | ✅ |
 | 5 | MOD11 validation with xUnit tests | ✅ |
 | 6 | Typed Brreg client with resilience | ✅ |
+| 7 | Importer: validate, then upsert page by page | ✅ |
 
 ---
 
@@ -366,10 +367,9 @@ public record BrregOrgForm(string? Kode);
 - Names match case-insensitively; only `_embedded` needs `[JsonPropertyName]`. `[property: ...]` puts the
   attribute on the generated property, not the constructor parameter.
 - Everything `?`: someone else's data, expect gaps. Step 7 validates before saving.
-- **Why `Brreg/` and not `Data/`:** `Data/` is *our* database (entities + DbContext). These records are
+- **Why not `Data/`:** `Data/` is *our* database (entities + DbContext). These records are
   Brreg's wire format, the outside world's contract. Same reason `Contracts/` is separate: our API's
-  shape. Keeping three shapes apart (Brreg's JSON → our entity → our DTO) means a change in Brreg's API
-  touches only `Brreg/` and the mapping in the importer.
+  shape. (Written in `Brreg/` first; moved to `Import/` in step 7.)
 
 **`Brreg/BrregClient.cs`:**
 ```csharp
@@ -421,6 +421,168 @@ The literal route `brreg` wins over `{orgnr}`, so the two don't clash.
 curl -sS "localhost:5020/api/companies/brreg?page=0&size=3" | jq '.page, [._embedded.enheter[].navn]'
 ```
 
+## Step 7: the importer, validate then upsert page by page
+
+**Folder:** `BrregClient.cs` and `BrregModel.cs` moved from `Brreg/` to `Import/` (namespace
+`Practice2.Api.Import`), next to the importer: grouped by feature. Remember to update the `using` in
+`Program.cs` when a namespace changes.
+
+**The three shapes of one company:**
+
+| Shape | Folder | Whose | Used for |
+|---|---|---|---|
+| `BrregEnhet` | `Import/` | Brreg's | the JSON coming in (`navn`, `organisasjonsnummer`) |
+| `Company` | `Data/` | ours: the database | the table row EF reads and saves |
+| `CompanyDto` | `Contracts/` | ours: the API | the JSON going out to the frontend |
+
+The importer maps `BrregEnhet` → `Company`; the controller's `Select` maps `Company` → `CompanyDto`. Each
+side can change alone.
+
+**One page, in words:** fetch → validate (Domain rules, on the Brreg record) → one query for the existing
+rows → update or add (tracking notices changes) → save once per page.
+
+**`Import/CompanyImporter.cs`:**
+```csharp
+public record ImportSummary(int Read, int Inserted, int Updated, int Unchanged, int Rejected);
+
+public class CompanyImporter(AppDbContext db, BrregClient brreg, ILogger<CompanyImporter> logger)
+{
+    private const int PageSize = 500;
+
+    public async Task<ImportSummary> RunAsync(CancellationToken ct)
+    {
+        int read = 0, inserted = 0, updated = 0, unchanged = 0, rejected = 0;
+
+        for (var page = 0; ; page++)
+        {
+            // Brreg's search API refuses to page past 10,000 rows.
+            if ((page + 1) * PageSize > 10_000)
+                break;
+
+            var result = await brreg.GetPageAsync(page, PageSize, ct);
+            var units = result.Embedded?.Enheter ?? [];
+            read += units.Count;
+
+            // 1. Validate: only clean rows go further.
+            var validBrregList = new List<BrregEnhet>();
+            foreach (var unit in units)
+            {
+                if (Orgnr.IsValid(unit.Organisasjonsnummer)
+                    && !string.IsNullOrWhiteSpace(unit.Navn)
+                    && !string.IsNullOrWhiteSpace(unit.Organisasjonsform?.Kode))
+                {
+                    validBrregList.Add(unit);
+                }
+                else
+                {
+                    rejected++;
+                    logger.LogWarning("Rejected {Orgnr} ({Name})", unit.Organisasjonsnummer, unit.Navn);
+                }
+            }
+
+            // 2. Load this page's companies that already exist, in one query.
+            var numbers = validBrregList.Select(u => u.Organisasjonsnummer!).ToList();
+            var existing = await db.Companies
+                .Where(c => numbers.Contains(c.Orgnr))
+                .ToDictionaryAsync(c => c.Orgnr, ct);
+
+            // 3. Upsert: update the existing, insert the new.
+            foreach (var validBrreg in validBrregList)
+            {
+                if (existing.TryGetValue(validBrreg.Organisasjonsnummer!, out var existingCompany))
+                {
+                    existingCompany.Name = validBrreg.Navn!;
+                    existingCompany.OrgForm = validBrreg.Organisasjonsform!.Kode!;
+                    existingCompany.RegistrationDate = validBrreg.RegistreringsdatoEnhetsregisteret;
+
+                    if (db.Entry(existingCompany).State == EntityState.Modified)
+                        updated++;
+                    else
+                        unchanged++;
+                }
+                else
+                {
+                    db.Companies.Add(new Company
+                    {
+                        Orgnr = validBrreg.Organisasjonsnummer!,
+                        Name = validBrreg.Navn!,
+                        OrgForm = validBrreg.Organisasjonsform!.Kode!,
+                        RegistrationDate = validBrreg.RegistreringsdatoEnhetsregisteret
+                    });
+                    inserted++;
+                }
+            }
+
+            // 4. Save this page in one transaction, then forget the tracked objects.
+            await db.SaveChangesAsync(ct);
+            db.ChangeTracker.Clear();
+
+            logger.LogInformation("Imported page {Page} of {TotalPages}", page + 1, result.Page.TotalPages);
+
+            if (page + 1 >= result.Page.TotalPages)
+                break;
+        }
+
+        return new ImportSummary(read, inserted, updated, unchanged, rejected);
+    }
+}
+```
+
+**How change tracking works here (concept 4), the part that clicked:**
+- The query in step 2 has **no `AsNoTracking()`**. So for each row it loads, EF (1) creates a `Company`
+  object and gives it to me, in the dictionary, and (2) keeps a note in `db.ChangeTracker`: "this
+  object, state Unchanged, and a snapshot of its original values".
+- `existingCompany` from `TryGetValue` is **that same object, not a copy**. `Company` is a class, a
+  reference type: the dictionary, my variable and the tracker all point at one object in memory (like
+  PHP objects). So setting `existingCompany.Name` changes the object EF is watching.
+- A `new Company { ... }` with the same values is a *second* object EF has no note about. Changing it
+  saves nothing; `Add`ing it gives a duplicate-key error.
+- `db.Entry(x).State` doesn't do the tracking, it *asks* for the verdict: current values vs snapshot →
+  `Modified` or `Unchanged`. We only use it to count.
+- `SaveChangesAsync` makes the same comparison for every tracked object: `Added` → INSERT, `Modified` →
+  UPDATE of the changed columns only, `Unchanged` → nothing. That's why a second run writes nothing.
+- `ChangeTracker.Clear()` drops all the notes; the next page starts empty.
+
+**Other details:**
+- `numbers.Contains(c.Orgnr)` → `WHERE orgnr = ANY(@numbers)`: one query per page, not 500 (no N+1).
+- `ToDictionaryAsync(c => c.Orgnr)` = `Dictionary<string, Company>`, keyed by orgnr. Like building
+  `$existing[$c->orgnr] = $c` in PHP.
+- `TryGetValue` instead of `existing[orgnr]`: the indexer **throws** `KeyNotFoundException` for a missing
+  key (PHP would give null). `TryGetValue` checks and gets in one call.
+- `Add` and the property setters are in memory only, so no `await`. Await only what goes to the
+  database: queries and `SaveChangesAsync`.
+- `unit.Navn!`: the `!` tells the compiler "not null"; the validation already checked.
+- `SaveChangesAsync` once per page = one transaction per page. A crash on page 9 keeps pages 1–8.
+- `{Orgnr}` placeholders in log messages, not `$"..."`: structured logs keep `Orgnr` as a searchable field.
+
+**`Program.cs`:** `builder.Services.AddScoped<CompanyImporter>();`. Scoped, because it holds the scoped
+`AppDbContext`.
+
+**`Controllers/ImportsController.cs`, temporary until step 8:**
+```csharp
+[ApiController]
+[Route("api/imports")]
+public class ImportsController(CompanyImporter importer) : ControllerBase
+{
+    // Temporary: runs the import inside the request. Step 8 moves it to a background worker.
+    [HttpPost]
+    public async Task<ImportSummary> Run(CancellationToken ct)
+        => await importer.RunAsync(ct);
+}
+```
+The `brreg` test endpoint from step 6 was removed from `CompaniesController`.
+
+```bash
+curl -sS -X POST localhost:5020/api/imports | jq     # ~7 s; the first run on the copied data inserted 8
+curl -sS -X POST localhost:5020/api/imports | jq     # again: inserted 0, everything unchanged
+```
+The table has more rows than Brreg returns (companies deleted at Brreg stay, because the importer never
+deletes). Delete them, or mark them deleted? A design question for later.
+
+**"Address already in use" on port 5020:** an old API process was still running after its terminal was
+closed (its parent was `init`). Find it with `ss -ltnp | grep 5020` and stop it with `kill <pid>`. Stop the
+API with Ctrl+C before closing a terminal. `dotnet watch --no-hot-reload` restarts on every save.
+
 ---
 
 ## Mistakes and what they taught
@@ -434,3 +596,6 @@ curl -sS "localhost:5020/api/companies/brreg?page=0&size=3" | jq '.page, [._embe
 | 4 | `OrgForm` compared as typed | `?orgForm=as` found 0 rows: normalise input (`Trim().ToUpperInvariant()`) before comparing |
 | 4 | `IReadOnlyList<T> items` (lower case) | Record parameters become public properties: PascalCase (`Items`). The JSON is camelCase either way |
 | 6 | `OrganisasjonsForm` (capital F) | It still worked (case-insensitive), but our own JSON then said `organisasjonsForm`. Copy the outside API's spelling: `Organisasjonsform` |
+| 7 | Moved the files but kept `using Practice2.Api.Brreg;` in Program.cs | A `using` names a namespace; when the namespace changes, every `using` of it must change too |
+| 7 | `curl` gave 404 after adding the controller | The running API was the old build. Restart after every change (or `dotnet watch`) |
+| 7 | Thought `Add(brregItem)` could insert directly | `Add` needs our entity, not Brreg's record: map `BrregEnhet` → `Company` first |
