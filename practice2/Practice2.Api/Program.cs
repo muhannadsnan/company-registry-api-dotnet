@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Practice2.Api.Data;
+using Practice2.Api.Brreg;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -10,6 +11,14 @@ builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("Practice2"))
             .UseSnakeCaseNamingConvention()
     );
+builder.Services.AddHttpClient<BrregClient>(http =>
+{
+    http.BaseAddress = new Uri("https://data.brreg.no/");
+    http.DefaultRequestHeaders.UserAgent.ParseAdd("practice2-api/1.0");
+})
+.AddStandardResilienceHandler();
+
+
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
 

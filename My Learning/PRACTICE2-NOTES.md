@@ -10,6 +10,8 @@ each part is there. The step list is in [PRACTICE-PLAN.md](PRACTICE-PLAN.md); th
 | 2 | `Company` entity, `AppDbContext`, first migration | ✅ |
 | 3 | Read from the database with a DTO | ✅ |
 | 4 | Search with filters and paging | ✅ |
+| 5 | MOD11 validation with xUnit tests | ✅ |
+| 6 | Typed Brreg client with resilience | ✅ |
 
 ---
 
@@ -222,6 +224,203 @@ curl -sS "localhost:5020/api/companies?name=bil&orgForm=as&page=2&pageSize=5" | 
 curl -si "localhost:5020/api/companies?pageSize=500" | head -1                                         # 400
 ```
 
+## Step 5: MOD11 validation, with xUnit tests
+
+**MOD11:** the 9th digit of an orgnr is a check digit calculated from the first 8, so a typo almost always
+breaks it. Example, `912855414`:
+1. First 8 digits × weights `3 2 7 6 5 4 3 2`, summed: `9·3 + 1·2 + 2·7 + 8·6 + 5·5 + 5·4 + 4·3 + 1·2 = 150`
+2. `150 % 11 = 7`
+3. `11 − 7 = 4` = the last digit, so it's valid. If the result is 11, the check digit is 0; if it's 10,
+   the number can never be valid.
+
+**The test project:**
+```bash
+cd practice2
+dotnet new xunit -n Practice2.Tests
+dotnet sln add Practice2.Tests          # the solution now lists 2 projects
+cd Practice2.Tests
+dotnet add reference ../Practice2.Api   # the tests can use the API's classes
+rm UnitTest1.cs
+```
+
+**`Practice2.Api/Domain/Orgnr.cs`:**
+```csharp
+public static class Orgnr
+{
+    private static readonly int[] Weights = [3, 2, 7, 6, 5, 4, 3, 2];
+
+    public static bool IsValid(string? value)
+    {
+        if (value is null || value.Length != 9 || !value.All(char.IsAsciiDigit))
+            return false;
+
+        var sum = 0;
+        for (var i = 0; i < Weights.Length; i++)
+        {
+            sum += (value[i] - '0') * Weights[i];
+        }
+
+        var control = 11 - (sum % 11);
+        if (control == 11)
+            control = 0;
+        else if (control == 10)
+            return false;
+
+        return control == value[8] - '0';
+    }
+}
+```
+- `static class`: no state, no DI, a pure function. `Domain/` keeps business rules apart from HTTP and
+  the database, which is what makes it easy to test.
+- `value[i] - '0'` turns the char `'7'` into the int `7` (chars are numbers underneath).
+- `char.IsAsciiDigit`, not `char.IsDigit`: `IsDigit` also accepts digits like Arabic-Indic `٣`.
+
+**`Practice2.Tests/OrgnrTests.cs`:**
+```csharp
+public class OrgnrTests
+{
+    [Theory]
+    [InlineData("923609016")] // Equinor ASA
+    [InlineData("974760673")] // Brønnøysundregistrene
+    [InlineData("912855414")]
+    public void Accepts_valid_numbers(string value)
+    {
+        Assert.True(Orgnr.IsValid(value));
+    }
+
+    [Theory]
+    [InlineData("923609017")] // wrong check digit (Equinor is 923609016)
+    [InlineData("12345678")]  // too short
+    [InlineData("1234567890")] // too long
+    [InlineData("92360901A")] // not a digit
+    [InlineData("")]
+    [InlineData(null)]
+    public void Rejects_invalid_values(string? value)
+    {
+        Assert.False(Orgnr.IsValid(value));
+    }
+
+    [Fact]
+    public void Rejects_a_prefix_where_the_check_digit_would_be_10()
+    {
+        // 4·3 = 12, 12 % 11 = 1, 11 − 1 = 10: no last digit can be valid.
+        for (var d = 0; d <= 9; d++)
+        {
+            Assert.False(Orgnr.IsValid($"00000040{d}"));
+        }
+    }
+}
+```
+- `[Fact]` = one test, no input. `[Theory]` + `[InlineData]` = one test per row, like PHPUnit's
+  `@dataProvider`.
+- Each "reject" row breaks exactly one rule (`923609017` keeps 9 characters; only the check digit is
+  wrong).
+- `$"00000040{d}"` is **string interpolation**, like PHP's `"00000040{$d}"` or JS's `` `00000040${d}` ``.
+  The loop tests `000000400` to `000000409`.
+
+**In the controller**, before the query in `GetByOrgnr`:
+```csharp
+if (!Orgnr.IsValid(orgnr))
+{
+    return Problem(
+        statusCode: StatusCodes.Status400BadRequest,
+        title: "Invalid organisation number",
+        detail: "An organisation number is nine digits with a valid MOD11 check digit.");
+}
+```
+`Problem(...)` returns RFC 9457 problem details, the same JSON shape as every other ASP.NET error.
+
+```bash
+dotnet test                                                    # Passed: 10
+curl -si localhost:5020/api/companies/123 | head -1            # 400: not an orgnr
+curl -si localhost:5020/api/companies/912855414 | head -1      # 200
+curl -si localhost:5020/api/companies/923609016 | head -1      # 404: valid orgnr, not in our data
+```
+
+## Step 6: a typed Brreg client, with resilience
+
+```bash
+dotnet add package Microsoft.Extensions.Http.Resilience --version 10.11.0
+```
+
+**`Brreg/BrregModels.cs`, records shaped like Brreg's JSON:**
+```csharp
+public record BrregPage(
+    [property: JsonPropertyName("_embedded")] BrregEmbedded? Embedded,
+    BrregPageInfo Page);
+
+public record BrregEmbedded(IReadOnlyList<BrregEnhet> Enheter);
+
+public record BrregPageInfo(int Size, int TotalElements, int TotalPages, int Number);
+
+public record BrregEnhet(
+    string? Organisasjonsnummer,
+    string? Navn,
+    BrregOrgForm? Organisasjonsform,
+    DateOnly? RegistreringsdatoEnhetsregisteret);
+
+public record BrregOrgForm(string? Kode);
+```
+- Mirrors `{ "_embedded": { "enheter": [...] }, "page": {...} }`. Fields without a property are skipped:
+  e-mail and phone are never even read (data minimisation).
+- Names match case-insensitively; only `_embedded` needs `[JsonPropertyName]`. `[property: ...]` puts the
+  attribute on the generated property, not the constructor parameter.
+- Everything `?`: someone else's data, expect gaps. Step 7 validates before saving.
+- **Why `Brreg/` and not `Data/`:** `Data/` is *our* database (entities + DbContext). These records are
+  Brreg's wire format, the outside world's contract. Same reason `Contracts/` is separate: our API's
+  shape. Keeping three shapes apart (Brreg's JSON → our entity → our DTO) means a change in Brreg's API
+  touches only `Brreg/` and the mapping in the importer.
+
+**`Brreg/BrregClient.cs`:**
+```csharp
+public class BrregClient(HttpClient http)
+{
+    public async Task<BrregPage> GetPageAsync(int page, int size, CancellationToken ct)
+    {
+        // Horten (3901) and Tønsberg (3905), AS and ASA.
+        var url = $"enhetsregisteret/api/enheter?page={page}&size={size}&kommunenummer=3901,3905&organisasjonsform=AS,ASA";
+
+        return await http.GetFromJsonAsync<BrregPage>(url, ct)
+            ?? throw new InvalidOperationException($"Brreg returned an empty body for page {page}.");
+    }
+}
+```
+`GetFromJsonAsync<T>` = GET + status check + deserialise, like Nuxt's `$fetch<T>()`. The URL is relative
+to the base address.
+
+**`Program.cs`:**
+```csharp
+builder.Services.AddHttpClient<BrregClient>(http =>
+{
+    http.BaseAddress = new Uri("https://data.brreg.no/");   // trailing / matters
+    http.DefaultRequestHeaders.UserAgent.ParseAdd("practice2-api/1.0");
+})
+.AddStandardResilienceHandler();
+```
+- **Typed client:** DI builds `BrregClient` with a configured `HttpClient`.
+- **`.AddStandardResilienceHandler()`:** retries with growing waits (5xx, 429, timeouts), a timeout per try
+  and in total, and a circuit breaker (stop calling a service that keeps failing).
+
+**Why not `new HttpClient()` per call?** Disposing it *does* close the connection, but the operating system
+keeps the closed socket in `TIME_WAIT` for up to a few minutes, so its port can't be reused yet. Under
+load, a new client per request uses up ports faster than they're freed: **socket exhaustion**. Also
+every call pays a new TCP + TLS handshake. The opposite, one static `HttpClient` forever, keeps
+connections open so long it never notices a DNS change. `AddHttpClient` (IHttpClientFactory) solves
+both: it pools the connection handlers and recycles them every couple of minutes.
+
+**Temporary test endpoint** (in `CompaniesController`, removed in step 7):
+```csharp
+[HttpGet("brreg")]
+public async Task<BrregPage> GetBrreg(BrregClient brreg, [FromQuery] int page, [FromQuery] int size, CancellationToken ct)
+    => await brreg.GetPageAsync(page, size, ct);
+```
+`BrregClient` here is an action parameter filled from DI: `[ApiController]` sees it's a registered service.
+The literal route `brreg` wins over `{orgnr}`, so the two don't clash.
+
+```bash
+curl -sS "localhost:5020/api/companies/brreg?page=0&size=3" | jq '.page, [._embedded.enheter[].navn]'
+```
+
 ---
 
 ## Mistakes and what they taught
@@ -234,3 +433,4 @@ curl -si "localhost:5020/api/companies?pageSize=500" | head -1                  
 | 4 | `CountAsync()` without `ct` | Pass the `CancellationToken` to *every* async EF call, or that query can't be cancelled |
 | 4 | `OrgForm` compared as typed | `?orgForm=as` found 0 rows: normalise input (`Trim().ToUpperInvariant()`) before comparing |
 | 4 | `IReadOnlyList<T> items` (lower case) | Record parameters become public properties: PascalCase (`Items`). The JSON is camelCase either way |
+| 6 | `OrganisasjonsForm` (capital F) | It still worked (case-insensitive), but our own JSON then said `organisasjonsForm`. Copy the outside API's spelling: `Organisasjonsform` |
