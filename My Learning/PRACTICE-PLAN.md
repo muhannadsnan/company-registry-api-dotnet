@@ -70,3 +70,8 @@ date only if practice3 needs it to tell persons apart.
 - Timed drills, 45 minutes each: a CRUD endpoint with EF Core and a test; a React page that fetches,
   lists and filters.
 - Mock interviews: a task without code, then a review like an interviewer would give.
+
+## practice4 (ideas)
+
+- **History tables:** when a role appeared or disappeared, and a company's earlier names. Brreg gives no
+  start or end dates for roles (only `avregistrert`), so the importer records when it *saw* a change.

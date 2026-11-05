@@ -109,6 +109,85 @@ namespace Practice2.Api.Data.Migrations
 
                     b.ToTable("import_runs", (string)null);
                 });
+
+            modelBuilder.Entity("Practice2.Api.Data.Role", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<int?>("BirthYear")
+                        .HasColumnType("integer")
+                        .HasColumnName("birth_year");
+
+                    b.Property<string>("Orgnr")
+                        .IsRequired()
+                        .HasMaxLength(9)
+                        .HasColumnType("character(9)")
+                        .HasColumnName("orgnr")
+                        .IsFixedLength();
+
+                    b.Property<string>("PersonName")
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)")
+                        .HasColumnName("person_name");
+
+                    b.Property<bool>("Resigned")
+                        .HasColumnType("boolean")
+                        .HasColumnName("resigned");
+
+                    b.Property<string>("RoleType")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)")
+                        .HasColumnName("role_type");
+
+                    b.Property<string>("UnitName")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("unit_name");
+
+                    b.Property<string>("UnitOrgnr")
+                        .HasMaxLength(9)
+                        .HasColumnType("character(9)")
+                        .HasColumnName("unit_orgnr")
+                        .IsFixedLength();
+
+                    b.HasKey("Id")
+                        .HasName("pk_roles");
+
+                    b.HasIndex("BirthYear")
+                        .HasDatabaseName("ix_roles_birth_year");
+
+                    b.HasIndex("RoleType")
+                        .HasDatabaseName("ix_roles_role_type");
+
+                    b.HasIndex("Orgnr", "RoleType", "PersonName", "BirthYear", "UnitOrgnr")
+                        .IsUnique()
+                        .HasDatabaseName("ux_roles_identity");
+
+                    NpgsqlIndexBuilderExtensions.AreNullsDistinct(b.HasIndex("Orgnr", "RoleType", "PersonName", "BirthYear", "UnitOrgnr"), false);
+
+                    b.ToTable("roles", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_roles_one_holder", "(person_name IS NULL) <> (unit_orgnr IS NULL)");
+                        });
+                });
+
+            modelBuilder.Entity("Practice2.Api.Data.Role", b =>
+                {
+                    b.HasOne("Practice2.Api.Data.Company", "Company")
+                        .WithMany()
+                        .HasForeignKey("Orgnr")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_roles_companies_orgnr");
+
+                    b.Navigation("Company");
+                });
 #pragma warning restore 612, 618
         }
     }

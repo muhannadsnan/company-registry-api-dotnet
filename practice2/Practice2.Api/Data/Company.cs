@@ -6,4 +6,6 @@ public class Company
     public required string Name { get; set; }
     public required string OrgForm { get; set; }
     public DateOnly? RegistrationDate { get; set; }
+
+    public List<Role>? Roles { get; set; }
 }

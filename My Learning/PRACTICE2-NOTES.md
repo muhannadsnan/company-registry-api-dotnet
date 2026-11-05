@@ -14,6 +14,7 @@ each part is there. The step list is in [PRACTICE-PLAN.md](PRACTICE-PLAN.md); th
 | 6 | Typed Brreg client with resilience | ✅ |
 | 7 | Importer: validate, then upsert page by page | ✅ |
 | 8 | Queue, background worker, `import_runs`, Abandoned on startup | ✅ |
+| 9a | `Role` entity and the `roles` table: a navigation, a natural key, a check constraint | ✅ |
 
 ---
 
@@ -847,6 +848,177 @@ curl -si -X POST localhost:5020/api/imports | head -1                     # 409 
 sleep 10; curl -sS localhost:5020/api/imports | jq                        # Succeeded, with counts
 # Abandoned: POST, Ctrl+C within 2 s, start again → "Marked 1 unfinished import run(s) as Abandoned"
 ```
+
+## Step 9a: the `roles` table
+
+**Why:** a company's roles from Brreg (`/enheter/{orgnr}/roller`): daglig leder, styreleder, members,
+the auditor. One row per role. The holder is **either a person** (name + birth year) **or another unit**
+(an orgnr + name, e.g. the auditing firm). Filled by the importer in 9b.
+
+**Decisions:**
+- **Only the code** (`LEDE`, `DAGL`) is stored; the names come from a dictionary in code (9c). Not a C#
+  enum: Brreg can add a code, and an enum can't hold a value it doesn't know.
+- **The birth year only**, not the full `fodselsdato`: GDPR data minimisation; the app doesn't need more.
+- **`UnitName` is stored**, not looked up: the auditor is usually not in our `companies` table, so a
+  foreign key to it isn't possible.
+- **No bostyrer** (an estate administrator: a name, no birth date, no orgnr). 9b skips them.
+- **No start/end dates:** Brreg doesn't give them. History is a practice4 idea.
+
+**`Data/Role.cs`:**
+```csharp
+public class Role
+{
+    public long Id { get; set; }
+
+    public required string Orgnr { get; set; }
+    public Company? Company { get; set; }
+
+    public required string RoleType { get; set; }
+
+    // The holder is either a person or another unit, never both.
+    public string? PersonName { get; set; }
+    public int? BirthYear { get; set; }
+    public string? UnitOrgnr { get; set; }
+    public string? UnitName { get; set; }
+
+    public bool Resigned { get; set; }
+}
+```
+In `Company.cs`, the other end of the link: `public List<Role>? Roles { get; set; }`.
+
+In `AppDbContext`: `public DbSet<Role> Roles => Set<Role>();` and
+```csharp
+modelBuilder.Entity<Role>(role =>
+{
+    role.Property(r => r.Orgnr).HasMaxLength(9).IsFixedLength();
+    role.Property(r => r.RoleType).HasMaxLength(10);
+    role.Property(r => r.PersonName).HasMaxLength(300);
+    role.Property(r => r.UnitOrgnr).HasMaxLength(9).IsFixedLength();
+    role.Property(r => r.UnitName).HasMaxLength(500);
+
+    role.HasOne(r => r.Company)
+        .WithMany(c => c.Roles)
+        .HasForeignKey(r => r.Orgnr)
+        .OnDelete(DeleteBehavior.Cascade);
+
+    // What identifies a role: the company, the type and the holder. NULLs count as equal,
+    // so two rows with the same person and no unit are duplicates too.
+    role.HasIndex(r => new { r.Orgnr, r.RoleType, r.PersonName, r.BirthYear, r.UnitOrgnr })
+        .IsUnique()
+        .AreNullsDistinct(false)
+        .HasDatabaseName("ux_roles_identity");
+
+    role.HasIndex(r => r.RoleType);
+    role.HasIndex(r => r.BirthYear);
+
+    role.ToTable(t => t.HasCheckConstraint(
+        "ck_roles_one_holder", "(person_name IS NULL) <> (unit_orgnr IS NULL)"));
+});
+```
+
+### The navigation property `Company? Company`
+
+Two properties describe the same link:
+
+| Property | What it is | In the table? |
+|---|---|---|
+| `Orgnr` | the **foreign key**: the value `"811577472"` | yes, the column `orgnr` |
+| `Company` | the **navigation**: the whole `Company` object that orgnr points to | no, never a column |
+
+The foreign key is enough for the relationship and the `FOREIGN KEY` constraint. The navigation is a
+convenience, so C# can "walk" from a role to its company, and EF writes the JOIN:
+```csharp
+db.Roles.Select(r => new { r.RoleType, r.PersonName, CompanyName = r.Company!.Name })
+// SELECT r.role_type, r.person_name, c.name FROM roles r INNER JOIN companies c ON r.orgnr = c.orgnr
+```
+Like Laravel: `orgnr` is the column, `$role->company` is the `belongsTo` relation.
+- It is **`null` unless loaded**: `db.Roles.First()` gives `Company == null` (EF doesn't load it by itself).
+  Inside a `Select` it's just a JOIN, or `.Include(r => r.Company)` loads the whole object.
+- **`?`** because of that, and **`!`** in `r.Company!.Name` tells the compiler "I know it's there" (in SQL
+  it always is).
+
+### `HasOne(...).WithMany()`
+
+The relationship has two ends, so the call has two halves:
+- `HasOne(r => r.Company)`: **this** side. A role has one company, reached by `r.Company`.
+- `WithMany(c => c.Roles)`: the **other** side. A company has many roles, reached by `company.Roles`
+  (Laravel's `hasMany`). `WithMany()` with empty brackets would mean `Company` has no such list. The
+  list is a navigation too: no column, no migration (`has-pending-model-changes` said "No changes"),
+  and `null` unless loaded (`.Include(c => c.Roles)`).
+- `HasForeignKey(r => r.Orgnr)`: the column that holds the link. EF's convention would look for a
+  property named `CompanyOrgnr`; ours is named `Orgnr`, and this line tells EF so. No `CompanyOrgnr`
+  is needed.
+- `OnDelete(Cascade)`: delete a company → its roles go too (`ON DELETE CASCADE`).
+
+### Why not a primary key of the 4 fields
+
+**A primary key column can never be NULL**, and every role has `person_name` *or* `unit_orgnr` NULL.
+So: `id` is the primary key, and the natural key is a **unique index**. It gives the same guarantee:
+"these fields together are unique". `birth_year` is in it, so two different "Ole Hansen"s stay apart.
+In practice3 (a `persons` table, so every role has a non-null `PersonId`), a composite key works:
+`HasKey(r => new { r.Orgnr, r.RoleType, r.PersonId })`.
+
+### `AreNullsDistinct(false)` = `NULLS NOT DISTINCT`
+
+**In one sentence:** compare NULL like a normal value, so `(Kari, NULL)` and `(Kari, NULL)` count as the same key.
+
+In SQL, `NULL = NULL` is not true but *unknown*. So by default a unique index treats **every NULL as
+different from every other NULL**, and lets "duplicates" in as long as one column is NULL:
+
+| orgnr | role_type | person_name | unit_orgnr | default (NULLS DISTINCT) | NULLS NOT DISTINCT |
+|---|---|---|---|---|---|
+| 123456789 | DAGL | Kari Nordmann | NULL | inserted | inserted |
+| 123456789 | DAGL | Kari Nordmann | NULL | **inserted too** (NULL ≠ NULL) | **ERROR: duplicate key** |
+| 123456789 | MEDL | Kari Nordmann | NULL | inserted | inserted (another type) |
+
+Our rows *always* have a NULL (no person or no unit), so without `NULLS NOT DISTINCT` the index would
+never block anything. (PostgreSQL 15+.) Tried on a temp table:
+```
+ERROR:  duplicate key value violates unique constraint "..."
+DETAIL:  Key (orgnr, role_type, person_name, unit_orgnr)=(123456789, DAGL, Kari Nordmann, null) already exists.
+```
+
+### Which columns get an index
+
+An index costs space and a little time on every insert, so it's added for a reason: a column that
+`WHERE`, `JOIN` or `ORDER BY` will use often.
+- `orgnr`: "roles of this company" (9c) and the JOIN. **Covered by `ux_roles_identity`**, because it is
+  the first column (an index on `(a, b, c)` also serves `WHERE a = ...`, like a phone book sorted by last
+  name, then first name). So EF didn't add its own index for the foreign key.
+- `role_type`, `birth_year`: the 9d filters (`?roleType=DAGL`, `?birthYear=1970`). In the big index they
+  are 2nd and 4th, so a filter on them alone can't use it.
+- `person_name`: the 9d name search is `ILIKE '%hansen%'`; a normal index doesn't help a leading `%`.
+- `unit_orgnr`, `unit_name`, `resigned`: nothing filters on them yet.
+
+### `ck_roles_one_holder`
+
+`(person_name IS NULL) <> (unit_orgnr IS NULL)`: each side is true/false, and `<>` means "different",
+so exactly one of them is NULL (an XOR):
+
+| person_name | unit_orgnr | `IS NULL` / `IS NULL` | Allowed |
+|---|---|---|---|
+| 'Kari Nordmann' | NULL | false / true | ✅ a person |
+| NULL | '987654321' | true / false | ✅ a unit |
+| 'Kari Nordmann' | '987654321' | false / false | ❌ both |
+| NULL | NULL | true / true | ❌ none |
+
+It checks only those two columns: `birth_year` and `unit_name` aren't part of the rule.
+
+### The two sequences
+
+`\d` lists `import_runs_id_seq` and `roles_id_seq`: one per `GENERATED ... AS IDENTITY` column. A
+sequence is a counter object that hands out the next id (`nextval`); `companies` has none because its key
+is the orgnr. **A sequence never rolls back:** a failed or rolled-back insert still used its number, so
+ids can have gaps. (My two test inserts above failed, so the first real role gets id 3.) Like MySQL's
+`AUTO_INCREMENT`, but a separate object.
+
+```bash
+dotnet ef migrations add AddRoles -o Data/Migrations
+dotnet ef migrations script MakeImportRunTimesNullable     # READ the SQL
+dotnet ef database update
+```
+Then `\d roles`: the columns, `pk_roles`, three indexes (`ux_roles_identity ... NULLS NOT DISTINCT`),
+`ck_roles_one_holder`, and `fk_roles_companies_orgnr ... ON DELETE CASCADE`.
 
 ---
 
