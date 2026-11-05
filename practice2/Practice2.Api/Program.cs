@@ -18,6 +18,8 @@ builder.Services.AddHttpClient<BrregClient>(http =>
     })
     .AddStandardResilienceHandler();
 builder.Services.AddScoped<CompanyImporter>();
+builder.Services.AddSingleton<ImportQueue>();
+builder.Services.AddHostedService<ImportWorker>();
 
 
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
