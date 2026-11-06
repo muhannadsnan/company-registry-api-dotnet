@@ -86,6 +86,10 @@ namespace Practice2.Api.Data.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("rejected");
 
+                    b.Property<int>("RolesSaved")
+                        .HasColumnType("integer")
+                        .HasColumnName("roles_saved");
+
                     b.Property<DateTimeOffset?>("StartedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("started_at");
@@ -162,14 +166,11 @@ namespace Practice2.Api.Data.Migrations
                     b.HasIndex("BirthYear")
                         .HasDatabaseName("ix_roles_birth_year");
 
+                    b.HasIndex("Orgnr")
+                        .HasDatabaseName("ix_roles_orgnr");
+
                     b.HasIndex("RoleType")
                         .HasDatabaseName("ix_roles_role_type");
-
-                    b.HasIndex("Orgnr", "RoleType", "PersonName", "BirthYear", "UnitOrgnr")
-                        .IsUnique()
-                        .HasDatabaseName("ux_roles_identity");
-
-                    NpgsqlIndexBuilderExtensions.AreNullsDistinct(b.HasIndex("Orgnr", "RoleType", "PersonName", "BirthYear", "UnitOrgnr"), false);
 
                     b.ToTable("roles", null, t =>
                         {
@@ -180,13 +181,18 @@ namespace Practice2.Api.Data.Migrations
             modelBuilder.Entity("Practice2.Api.Data.Role", b =>
                 {
                     b.HasOne("Practice2.Api.Data.Company", "Company")
-                        .WithMany()
+                        .WithMany("Roles")
                         .HasForeignKey("Orgnr")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired()
                         .HasConstraintName("fk_roles_companies_orgnr");
 
                     b.Navigation("Company");
+                });
+
+            modelBuilder.Entity("Practice2.Api.Data.Company", b =>
+                {
+                    b.Navigation("Roles");
                 });
 #pragma warning restore 612, 618
         }

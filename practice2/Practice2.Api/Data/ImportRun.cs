@@ -18,4 +18,6 @@ public class ImportRun
     public int Unchanged { get; set; }
     public int Rejected { get; set; }
     public string? Error { get; set; }
+
+    public int RolesSaved { get; set; }
 }

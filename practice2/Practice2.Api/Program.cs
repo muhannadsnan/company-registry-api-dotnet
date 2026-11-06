@@ -18,6 +18,7 @@ builder.Services.AddHttpClient<BrregClient>(http =>
     })
     .AddStandardResilienceHandler();
 builder.Services.AddScoped<CompanyImporter>();
+builder.Services.AddScoped<RoleImporter>();
 builder.Services.AddSingleton<ImportQueue>();
 builder.Services.AddHostedService<ImportWorker>();
 

@@ -15,6 +15,7 @@ each part is there. The step list is in [PRACTICE-PLAN.md](PRACTICE-PLAN.md); th
 | 7 | Importer: validate, then upsert page by page | ✅ |
 | 8 | Queue, background worker, `import_runs`, Abandoned on startup | ✅ |
 | 9a | `Role` entity and the `roles` table: a navigation, a natural key, a check constraint | ✅ |
+| 9b | Roles import: one Brreg call per company, 5 at a time, replace each chunk's roles in a transaction | ✅ |
 
 ---
 
@@ -864,6 +865,12 @@ the auditor. One row per role. The holder is **either a person** (name + birth y
 - **No bostyrer** (an estate administrator: a name, no birth date, no orgnr). 9b skips them.
 - **No start/end dates:** Brreg doesn't give them. History is a practice4 idea.
 
+> **Changed in 9b:** we decided to **mirror Brreg** as it publishes: store every role, skip nothing.
+> A bostyrer's name goes in `PersonName`. The unique index `ux_roles_identity` was dropped (the
+> importer replaces a company's roles, so a re-run can't repeat them), and EF then added
+> `ix_roles_orgnr` for the foreign key by itself. The sections below on the natural key and
+> `NULLS NOT DISTINCT` stay: the idea is worth knowing.
+
 **`Data/Role.cs`:**
 ```csharp
 public class Role
@@ -984,7 +991,8 @@ An index costs space and a little time on every insert, so it's added for a reas
 `WHERE`, `JOIN` or `ORDER BY` will use often.
 - `orgnr`: "roles of this company" (9c) and the JOIN. **Covered by `ux_roles_identity`**, because it is
   the first column (an index on `(a, b, c)` also serves `WHERE a = ...`, like a phone book sorted by last
-  name, then first name). So EF didn't add its own index for the foreign key.
+  name, then first name). So EF didn't add its own index for the foreign key. (After 9b dropped the
+  unique index, EF added `ix_roles_orgnr` by itself.)
 - `role_type`, `birth_year`: the 9d filters (`?roleType=DAGL`, `?birthYear=1970`). In the big index they
   are 2nd and 4th, so a filter on them alone can't use it.
 - `person_name`: the 9d name search is `ILIKE '%hansen%'`; a normal index doesn't help a leading `%`.
@@ -1020,6 +1028,228 @@ dotnet ef database update
 Then `\d roles`: the columns, `pk_roles`, three indexes (`ux_roles_identity ... NULLS NOT DISTINCT`),
 `ck_roles_one_holder`, and `fk_roles_companies_orgnr ... ON DELETE CASCADE`.
 
+## Step 9b: the roles import
+
+**Why:** fill `roles`. Brreg gives roles **one company at a time**
+(`GET /enhetsregisteret/api/enheter/{orgnr}/roller`), so the import makes one call per company: about
+7,200 calls. It runs in the same import run, right after the companies.
+
+**Decision: mirror Brreg.** Store every role as Brreg publishes it: no skipping, no unique index. Roles
+are a **snapshot** (they change all together, in content and in number), so each company's roles are
+**replaced**, not upserted. Any cleaning or pre-calculation belongs elsewhere (controllers, the
+frontend, or tables filled at night), which is common in real systems.
+(For the whole of Norway there is a bulk download, `/roller/totalbestand`; too much for two municipalities.)
+
+### Brreg's JSON, and why the model needs every level
+
+```json
+{ "rollegrupper": [
+    { "type": { "kode": "STYR" },
+      "roller": [
+        { "type": { "kode": "LEDE" }, "avregistrert": false,
+          "person": { "navn": { "fornavn": "Kari", "etternavn": "Nordmann" }, "fodselsdato": "1970-04-04" } },
+        { "type": { "kode": "REVI" },
+          "enhet": { "organisasjonsnummer": "922633452", "navn": ["AIDER AS"] } },
+        { "type": { "kode": "BOBE" },
+          "bostyrer": { "navn": "Adv. Ola Hansen" } } ] } ] }
+```
+The holder is one of three: `person`, `enhet` (another unit; its `navn` is a **list**), or `bostyrer`
+(a bankruptcy estate's administrator, only a name).
+
+> **Essential when reading JSON:** `ReadFromJsonAsync<T>` must be given a type that matches the **top**
+> of the JSON. Here the top is `{ "rollegrupper": [...] }`, so `T` is `BrregRoles`, which holds
+> `BrregRoleGroup`s, which hold `BrregRole`s. You can't skip a level and ask for `List<BrregRole>`
+> directly: the reader would look for a list at the top and find an object. So the model has a record
+> for **every level on the way down**, but only with the fields you need (the rest are ignored). Then
+> the code flattens it.
+
+**`Import/BrregModel.cs`** (added):
+```csharp
+// GET /enhetsregisteret/api/enheter/{orgnr}/roller
+public record BrregRoles(IReadOnlyList<BrregRoleGroup>? Rollegrupper);
+
+public record BrregRoleGroup(IReadOnlyList<BrregRole>? Roller);
+
+public record BrregRole(BrregRoleType? Type, BrregPerson? Person, BrregRoleUnit? Enhet, BrregBostyrer? Bostyrer, bool Avregistrert);
+
+public record BrregRoleType(string? Kode);
+
+public record BrregPerson(BrregPersonName? Navn, DateOnly? Fodselsdato);
+
+public record BrregPersonName(string? Fornavn, string? Mellomnavn, string? Etternavn);
+
+public record BrregRoleUnit(string? Organisasjonsnummer, IReadOnlyList<string>? Navn);
+
+public record BrregBostyrer(string? Navn);
+```
+`BrregBostyrer` is only the incoming shape: the entity gets no new field, its name goes in
+`PersonName`. Without it the reader would drop the `bostyrer` field, and the role would have no holder.
+
+**Another option: `jsonb`.** Store each company's raw JSON in one `jsonb` column (a "landing table"),
+and pick fields later with SQL (`data->>'navn'`). The model stays tiny, which helps when the JSON is
+big or changes often. The cost: no types or constraints, and filters need special indexes. Common as a
+first stage ("land raw, transform later"). Here we filter on the fields, so columns are right.
+
+### `BrregClient.GetRolesAsync`: the client hides the nesting
+```csharp
+// Brreg nests the roles in groups; the importer only needs the roles themselves.
+public async Task<IReadOnlyList<BrregRole>> GetRolesAsync(string orgnr, CancellationToken ct)
+{
+    var response = await http.GetAsync($"enhetsregisteret/api/enheter/{orgnr}/roller", ct);
+
+    // A company deleted from Brreg since the company import: no roles, not an error.
+    if (response.StatusCode == HttpStatusCode.NotFound)
+        return [];
+
+    response.EnsureSuccessStatusCode();
+    var result = await response.Content.ReadFromJsonAsync<BrregRoles>(ct);
+    return result?.Rollegrupper?.SelectMany(g => g.Roller ?? []).ToList() ?? [];
+}
+```
+- `GetAsync` instead of `GetFromJsonAsync`: we can look at the status first. `GetFromJsonAsync` throws
+  on 404, and one deleted company would fail the whole run. Other errors still throw
+  (`EnsureSuccessStatusCode`), after the resilience handler's retries.
+- `SelectMany` flattens the groups' role lists into one list, like
+  `array_merge(...array_column($groups, 'roller'))`.
+- The importer only sees `BrregRole`: `BrregRoles` and `BrregRoleGroup` stay inside the client.
+
+### `Import/RoleImporter.cs`
+```csharp
+public record RoleImportSummary(int Companies, int Saved);
+
+public class RoleImporter(AppDbContext db, BrregClient brreg, ILogger<RoleImporter> logger)
+{
+    // Also how many Brreg calls run at the same time.
+    private const int ChunkSize = 5;
+
+    public async Task<RoleImportSummary> RunAsync(CancellationToken ct)
+    {
+        var allOrgnrs = await db.Companies.OrderBy(c => c.Orgnr).Select(c => c.Orgnr).ToListAsync(ct);
+        int done = 0, saved = 0;
+
+        foreach (var chunk in allOrgnrs.Chunk(ChunkSize))
+        {
+            // 1. Start one call per company (no await: each call starts and runs on),
+            //    keyed by orgnr, then wait until all of them have answered.
+            var calls = new Dictionary<string, Task<IReadOnlyList<BrregRole>>>();
+            foreach (var orgnr in chunk)
+                calls[orgnr] = brreg.GetRolesAsync(orgnr, ct);
+            await Task.WhenAll(calls.Values);
+
+            // 2. Map every role, as Brreg sends it: for each company, for each of its roles.
+            var newRoles = new List<Role>();
+            foreach (var (orgnr, call) in calls)
+            {
+                var brregRoles = await call;   // already finished: returns at once
+                foreach (var brregRole in brregRoles)
+                    newRoles.Add(FillRole(orgnr, brregRole));
+            }
+
+            // 3. Replace the chunk's roles: delete the old, insert the new, all or nothing.
+            await using var transaction = await db.Database.BeginTransactionAsync(ct);
+            await db.Roles.Where(r => chunk.Contains(r.Orgnr)).ExecuteDeleteAsync(ct);
+            db.Roles.AddRange(newRoles);
+            await db.SaveChangesAsync(ct);
+            await transaction.CommitAsync(ct);
+            db.ChangeTracker.Clear();
+
+            done += chunk.Length;
+            saved += newRoles.Count;
+            if (done % 500 == 0 || done == allOrgnrs.Count)
+                logger.LogInformation("Roles: {Done} of {Total} companies", done, allOrgnrs.Count);
+        }
+
+        return new RoleImportSummary(done, saved);
+    }
+
+    // The holder is a person, another unit, or a bostyrer (a bankruptcy estate's
+    // administrator: only a name, stored as the person's name).
+    private static Role FillRole(string orgnr, BrregRole brregRole)
+    {
+        var role = new Role
+        {
+            Orgnr = orgnr,
+            RoleType = brregRole.Type!.Kode!,
+            Resigned = brregRole.Avregistrert
+        };
+
+        if (brregRole.Enhet is not null)
+        {
+            role.UnitOrgnr = brregRole.Enhet.Organisasjonsnummer;
+            role.UnitName = string.Join(" ", brregRole.Enhet.Navn ?? []);
+        }
+        else if (brregRole.Person?.Navn is not null)
+        {
+            var navn = brregRole.Person.Navn;
+            role.PersonName = string.Join(" ",
+                new[] { navn.Fornavn, navn.Mellomnavn, navn.Etternavn }.Where(p => !string.IsNullOrWhiteSpace(p)));
+            role.BirthYear = brregRole.Person.Fodselsdato?.Year;
+        }
+        else if (brregRole.Bostyrer is not null)
+        {
+            role.PersonName = brregRole.Bostyrer.Navn;
+        }
+
+        return role;
+    }
+}
+```
+**In one breath (for an interview):** "Load all orgnrs. In chunks of 5: start the 5 Brreg calls at once
+and wait for all of them. Map every role to our entity. Then delete the chunk's old roles and insert the
+new ones in one transaction, because roles are a snapshot. Clear the tracker, log, return the counts."
+
+- **`Chunk(5)`** splits the list into arrays of 5 (PHP's `array_chunk`). Here it is also the limit on
+  parallel calls: polite to a free public API.
+- **Calling an async method without `await` starts it** and gives back a `Task` (a promise). `await`
+  waits. So `await` inside the first `foreach` would mean one call at a time.
+- **`Task.WhenAll`** = `Promise.all`: wait until all have finished.
+- **`Dictionary<string, Task<IReadOnlyList<BrregRole>>>`**: a promise per orgnr; each promise gives that
+  company's roles (the same type `GetRolesAsync` returns). Keyed by orgnr because **a role in Brreg's
+  JSON doesn't say which company it belongs to**; that's only in the URL.
+- `foreach (var (orgnr, call) in calls)` = `foreach ($calls as $orgnr => $call)`. `await call` on a
+  finished task returns at once (`call.Result` works too, but `.Result` is a habit interviewers flag).
+- **Two loops**, because the data has two levels: companies, then each company's roles.
+- **The transaction:** `ExecuteDeleteAsync` sends `DELETE ... WHERE orgnr = ANY(...)` at once, without
+  loading rows (like step 8's `ExecuteUpdateAsync`). Without a transaction, a crash after the delete
+  would leave those companies with no roles. With it, the delete and the inserts commit together, and
+  `await using` rolls back if anything throws before `CommitAsync`.
+- **`Type!.Kode!`**: Brreg always sends a code; if not, the `NOT NULL` column fails loudly.
+- **The DbContext is only used after `WhenAll`**, one step at a time. The HTTP calls run in parallel
+  (HttpClient is thread-safe); a DbContext must never be used by two threads at once.
+- **Why it takes ~66 s, not 18 min:** `curl` took 0.15 s per call because each `curl` opens a new
+  connection (TLS handshake). The app's HttpClient keeps connections open (step 6), about 0.04 s per
+  call: ~4.5 min one at a time, ~66 s with 5 at once.
+
+**The rest:**
+- `Data/ImportRun.cs`: `public int RolesSaved { get; set; }`, and the DTO gets `int RolesSaved`.
+- `Program.cs`: `builder.Services.AddScoped<RoleImporter>();`
+- `ImportWorker.cs`: get a `RoleImporter` from the same scope; in the `try`, after the companies:
+  `roleSummary = await roleImporter.RunAsync(stoppingToken);`; at the end:
+  `run.RolesSaved = roleSummary?.Saved ?? 0;`. Both importers share one DbContext; fine, since they
+  run one after the other.
+- `AppDbContext`: the `ux_roles_identity` block removed.
+
+```bash
+dotnet ef migrations add RoleImportChanges -o Data/Migrations
+dotnet ef migrations script AddRoles     # DROP INDEX ux_roles_identity; ADD roles_saved; CREATE INDEX ix_roles_orgnr
+dotnet ef database update
+```
+**Result (run 13):** 72 s, 7,198 companies read, **26,472 roles** (19,443 persons, 7,029 units,
+55 bostyrer). Codes: LEDE, MEDL, DAGL, REGN, REVI, VARA, BOBE, FFØR. `FFØR` (forretningsfører) wasn't
+in the first sample: why role names are a dictionary, not an enum.
+
+### When migrations go wrong: `remove`, never delete by hand
+
+The **snapshot** (`AppDbContextModelSnapshot.cs`) is EF's picture of the model after all migrations.
+`migrations add` compares the model with the snapshot, writes the difference, and updates the snapshot.
+- I ran `migrations add` with `-o Date/Migrations` (typo), then deleted that folder by hand. The
+  snapshot kept the new columns, so the next `add` found **no difference** and wrote an **empty**
+  migration. `database update` applied it: "applied", but no columns.
+- **`dotnet ef migrations remove`** deletes the migration files **and reverts the snapshot**. For a
+  migration already applied: `database update <PreviousMigration>` first, then `remove`. Only for
+  migrations that were never pushed; otherwise fix on top.
+- `dotnet ef` builds the project first: one compile error blocks every `ef` command.
+
 ---
 
 ## Mistakes and what they taught
@@ -1039,3 +1269,5 @@ Then `\d roles`: the columns, `pk_roles`, three indexes (`ux_roles_identity ... 
 | 8 | `FinishedT` typo and no `?` on the start/finish times | Read the migration's SQL before `database update`. Fixed with two migrations on top |
 | 8 | "dotnet watch won't work" | The app crashed on startup: a throwing `BackgroundService` stops the host. Read the log for the first `fail:` |
 | 8 | `FinishededAt` and no `?` in the DTO too | The DTO mirrors the entity's nullability; fix both |
+| 9b | `-o Date/Migrations`, then deleted the folder by hand | The snapshot kept the change, so the next `add` was empty. Use `migrations remove`: it reverts the snapshot too |
+| 9b | `await Task.WhenAll(calls).ToDictionaryAsync()` | `ToDictionaryAsync` is EF's, for database queries. `WhenAll` returns a plain array; key by orgnr by making `calls` a dictionary |

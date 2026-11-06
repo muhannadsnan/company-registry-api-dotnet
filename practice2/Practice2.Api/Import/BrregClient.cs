@@ -1,3 +1,5 @@
+using System.Net;
+
 namespace Practice2.Api.Import;
 
 public class BrregClient(HttpClient http)
@@ -9,5 +11,19 @@ public class BrregClient(HttpClient http)
 
         return await http.GetFromJsonAsync<BrregPage>(url, ct)
             ?? throw new InvalidOperationException($"Brreg returned an empty body for page {page}.");
+    }
+
+    // Brreg nests the roles in groups; the importer only needs the roles themselves.
+    public async Task<IReadOnlyList<BrregRole>> GetRolesAsync(string orgnr, CancellationToken ct)
+    {
+        var response = await http.GetAsync($"enhetsregisteret/api/enheter/{orgnr}/roller", ct);
+
+        // A company deleted from Brreg since the company import: no roles, not an error.
+        if (response.StatusCode == HttpStatusCode.NotFound)
+            return [];
+
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<BrregRoles>(ct);
+        return result?.Rollegrupper?.SelectMany(g => g.Roller ?? []) .ToList() ?? []; // SelectMany() is like array_merge in PHP
     }
 }

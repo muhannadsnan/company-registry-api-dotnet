@@ -13,9 +13,10 @@ public record ImportRunDto(
     int Updated,
     int Unchanged,
     int Rejected,
+    int RolesSaved,
     string? Error)
 {
     public static ImportRunDto Fill(ImportRun r) => new(
         r.Id, r.Status.ToString(), r.QueuedAt, r.StartedAt, r.FinishedAt,
-        r.Read, r.Inserted, r.Updated, r.Unchanged, r.Rejected, r.Error);
+        r.Read, r.Inserted, r.Updated, r.Unchanged, r.Rejected, r.RolesSaved, r.Error);
 }

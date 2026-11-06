@@ -37,13 +37,6 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
                 .HasForeignKey(r => r.Orgnr)
                 .OnDelete(DeleteBehavior.Cascade);
 
-            // What identifies a role: the company, the type and the holder. NULLs count as equal,
-            // so two rows with the same person and no unit are duplicates too.
-            role.HasIndex(r => new { r.Orgnr, r.RoleType, r.PersonName, r.BirthYear, r.UnitOrgnr })
-                .IsUnique()
-                .AreNullsDistinct(false)
-                .HasDatabaseName("ux_roles_identity");
-
             role.HasIndex(r => r.RoleType);
             role.HasIndex(r => r.BirthYear);
 
