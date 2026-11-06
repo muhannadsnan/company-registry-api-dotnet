@@ -16,6 +16,7 @@ each part is there. The step list is in [PRACTICE-PLAN.md](PRACTICE-PLAN.md); th
 | 8 | Queue, background worker, `import_runs`, Abandoned on startup | ✅ |
 | 9a | `Role` entity and the `roles` table: a navigation, a natural key, a check constraint | ✅ |
 | 9b | Roles import: one Brreg call per company, 5 at a time, replace each chunk's roles in a transaction | ✅ |
+| 9c | `GET /api/companies/{orgnr}/roles`: `Include`, a code → name dictionary, 400/404/200 `[]` | ✅ |
 
 ---
 
@@ -1250,6 +1251,155 @@ The **snapshot** (`AppDbContextModelSnapshot.cs`) is EF's picture of the model a
   migrations that were never pushed; otherwise fix on top.
 - `dotnet ef` builds the project first: one compile error blocks every `ef` command.
 
+## Step 9c: `GET /api/companies/{orgnr}/roles`
+
+**Why:** a company's roles, each with a readable name ("Styrets leder", not only `LEDE`). The first real
+use of the navigation `Company.Roles`.
+
+### `Domain/RoleTypes.cs`: role names, keyed by code
+```csharp
+// Brreg's role codes and their names (from /enhetsregisteret/api/roller/rolletyper).
+// Only the codes are stored; a code missing here is shown as itself.
+public static class RoleTypes
+{
+    private static readonly Dictionary<string, string> Names = new()
+    {
+        ["DAGL"] = "Daglig leder",
+        ["LEDE"] = "Styrets leder",
+        ["NEST"] = "Nestleder",
+        ["MEDL"] = "Styremedlem",
+        ["VARA"] = "Varamedlem",
+        ["OBS"] = "Observatør",
+        ["REGN"] = "Regnskapsfører",
+        ["REVI"] = "Revisor",
+        ["FFØR"] = "Forretningsfører",
+        ["BOBE"] = "Bostyrer",
+        ["KONT"] = "Kontaktperson",
+        ["KDEB"] = "Konkursdebitor",
+    };
+
+    public static string TextOf(string code) => Names.GetValueOrDefault(code, code);
+}
+```
+- `new() { ["DAGL"] = "..." }` is a dictionary initializer: `['DAGL' => '...']`.
+- **A dictionary, not an enum:** an unknown code (Brreg has 27) falls back to the code itself.
+- **`Names[code] ?? code` does NOT work in C#.** The indexer **throws `KeyNotFoundException`** for a
+  missing key (PHP returns null, C# doesn't), so `??` is never reached and the endpoint gives 500.
+  `GetValueOrDefault(key, fallback)` is the C# version of PHP's `$names[$code] ?? $code`.
+- The import never uses names (it stores codes), so the fallback protects the **endpoint**.
+
+### `Contracts/RoleDto.cs`
+```csharp
+public record RoleDto(
+    string RoleType,
+    string RoleName,
+    string? PersonName,
+    int? BirthYear,
+    string? UnitOrgnr,
+    string? UnitName,
+    bool Resigned);
+```
+No `Id`, `Orgnr` or `Company`: the caller knows the company, and our internal id isn't the API's business.
+
+### The action, in `CompaniesController`
+```csharp
+[HttpGet("{orgnr}/roles")]
+public async Task<ActionResult<List<RoleDto>>> GetRoles(string orgnr, CancellationToken ct)
+{
+    if (!Orgnr.IsValid(orgnr))
+    {
+        return Problem(
+            statusCode: StatusCodes.Status400BadRequest,
+            title: "Invalid ORGNR",
+            detail: "An ORGNR should be 9 digits with a valid MOD11 check digit."
+        );
+    }
+
+    // Include: load the company AND its roles, in one query (a LEFT JOIN).
+    var company = await db.Companies.AsNoTracking()
+        .Include(c => c.Roles)
+        .FirstOrDefaultAsync(c => c.Orgnr == orgnr, ct);
+    if (company is null)
+        return NotFound();
+
+    return company.Roles!
+        .Select(r => new RoleDto(
+            r.RoleType, RoleTypes.TextOf(r.RoleType),
+            r.PersonName, r.BirthYear, r.UnitOrgnr, r.UnitName, r.Resigned))
+        .OrderBy(r => r.RoleName)
+        .ThenBy(r => r.PersonName ?? r.UnitName)
+        .ToList();
+}
+```
+- **`Include(c => c.Roles)`** = Laravel's `Company::with('roles')->find($orgnr)`. EF sends one query:
+  `SELECT ... FROM (SELECT ... FROM companies WHERE orgnr = @orgnr LIMIT 1) c0 LEFT JOIN roles r ON c0.orgnr = r.orgnr`
+  and fills `company.Roles`. Without `Include`, `Roles` stays `null`.
+- **The LEFT JOIN keeps the three cases apart:**
+
+| Request | Result |
+|---|---|
+| `/api/companies/123456789/roles` (bad MOD11) | **400** |
+| a valid orgnr not in our table | **404** |
+| a company with no roles (18 of 7,228) | **200** `[]` |
+
+- **Why `OrderBy` comes after `Select` here.** "Where/OrderBy first, Select last" is for an `IQueryable`
+  (SQL not sent yet): the order shapes the SQL. After `FirstOrDefaultAsync` the query has run, and
+  `company.Roles` is a plain list in memory: ordinary LINQ, like `array_map` + `usort`. And `RoleName`
+  doesn't exist in the database; it's made in the `Select`, so it can only be sorted after.
+  **Rule of thumb:** before the `await ...Async(ct)` you're building SQL; after it, you're working on a list.
+
+### Ordering by "power" (an idea, not in the code)
+Keep the name and a rank together, keyed by code, using a **tuple** (two named values, no class):
+```csharp
+private static readonly Dictionary<string, (string Name, int Rank)> Types = new()
+{
+    ["DAGL"] = ("Daglig leder", 10),
+    ["LEDE"] = ("Styrets leder", 20),
+    // ...
+};
+public static int RankOf(string code) => Types.TryGetValue(code, out var t) ? t.Rank : 999;  // unknown: last
+```
+```csharp
+company.Roles!
+    .OrderBy(r => RoleTypes.RankOf(r.RoleType))
+    .ThenBy(r => r.BirthYear ?? int.MaxValue)   // oldest first; units (no birth year) last
+    .Select(r => new RoleDto(...))
+```
+Sorted **before** the `Select`, on the entity, so the rank never reaches the JSON. In memory, C# can
+call `RankOf`. In a **database** query it can't ("could not be translated"): write it inline
+(`r.RoleType == "DAGL" ? 10 : ...` becomes SQL `CASE WHEN`) or store the rank in a `role_types` table.
+
+### A company *with* its relationships: one DTO per response shape
+```csharp
+public record CompanyDetailsDto(
+    string Orgnr, string Name, string OrgForm, DateOnly? RegistrationDate,
+    List<RoleDto> Roles,
+    List<ShareholderDto> Shareholders);
+```
+- Small DTOs (`RoleDto`, `ShareholderDto`) are building blocks, reused inside bigger ones. Each
+  endpoint has one exact contract.
+- **Not one big DTO with nullable relationships:** `roles: null` would mean either "not loaded here" or
+  "has none", and every field becomes optional in the frontend. (Laravel's `whenLoaded()` does that;
+  typed C# records prefer separate DTOs.)
+- **`Include` + `Select` without the roles in the DTO:** EF **ignores the `Include`**. A `Select`
+  decides what comes back; if the DTO has no roles, no roles are loaded.
+- **Two ways to fill it:**
+  1. Load the entity with `Include`, then map in C# with `Fill` methods (like `ImportRunDto.Fill`).
+     Natural, and fine for one company.
+  2. A nested `Select` inside the query: only the needed columns, no entities. Tested: works, one
+     LEFT JOIN, and `RoleTypes.TextOf` can be called in it (EF runs it in C# for each row).
+- With **two** collections (roles + shareholders) in one JOIN, rows multiply (7 × 20 = 140 for one
+  company): the "Cartesian explosion". `AsSplitQuery()` sends one query per collection instead.
+- Often simpler: keep `/companies/{orgnr}` lean, and let the frontend fetch `/roles` and
+  `/shareholders` in parallel, only when shown.
+
+```bash
+curl -s localhost:5020/api/companies/810733772/roles | jq '.[].roleName'
+curl -si localhost:5020/api/companies/123456789/roles | head -1    # 400
+curl -si localhost:5020/api/companies/914778271/roles | head -1    # 404
+curl -s  localhost:5020/api/companies/991865500/roles              # []
+```
+
 ---
 
 ## Mistakes and what they taught
@@ -1271,3 +1421,4 @@ The **snapshot** (`AppDbContextModelSnapshot.cs`) is EF's picture of the model a
 | 8 | `FinishededAt` and no `?` in the DTO too | The DTO mirrors the entity's nullability; fix both |
 | 9b | `-o Date/Migrations`, then deleted the folder by hand | The snapshot kept the change, so the next `add` was empty. Use `migrations remove`: it reverts the snapshot too |
 | 9b | `await Task.WhenAll(calls).ToDictionaryAsync()` | `ToDictionaryAsync` is EF's, for database queries. `WhenAll` returns a plain array; key by orgnr by making `calls` a dictionary |
+| 9c | `Names[code] ?? code` | A C# dictionary indexer throws for a missing key; `??` never runs. Use `GetValueOrDefault(code, code)` |
