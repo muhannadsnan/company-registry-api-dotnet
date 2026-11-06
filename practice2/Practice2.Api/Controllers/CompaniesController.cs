@@ -74,13 +74,17 @@ public class CompaniesController(AppDbContext db) : ControllerBase
         if (company is null)
             return NotFound();
 
+        // just an idea: return company is null ? NotFound() : CompanyDetailsDto.Fill(company);
 
+        /*
+         No db call so sorting CAN be after the select or before it
+        */
         return company.Roles!
             .Select(r => new RoleDto(
-                r.RoleType, RoleTypes.TextOf(r.RoleType),
+                r.RoleType, RoleTypes.NameOf(r.RoleType),
                 r.PersonName, r.BirthYear, r.UnitOrgnr, r.UnitName, r.Resigned))
-            .OrderBy(r => r.RoleName)
-            .ThenBy(r => r.PersonName ?? r.UnitName)
+            .OrderBy(d => RoleTypes.RankOf(d.RoleType))
+            .ThenBy(d => d.BirthYear ?? int.MaxValue) // oldest first; units (no birth year) last
             .ToList();
     }
 

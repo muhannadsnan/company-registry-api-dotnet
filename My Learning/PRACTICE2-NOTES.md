@@ -17,6 +17,7 @@ each part is there. The step list is in [PRACTICE-PLAN.md](PRACTICE-PLAN.md); th
 | 9a | `Role` entity and the `roles` table: a navigation, a natural key, a check constraint | ✅ |
 | 9b | Roles import: one Brreg call per company, 5 at a time, replace each chunk's roles in a transaction | ✅ |
 | 9c | `GET /api/companies/{orgnr}/roles`: `Include`, a code → name dictionary, 400/404/200 `[]` | ✅ |
+| 9d | `GET /api/roles` search: person-or-unit name, comma-separated lists, birth-year range, the company via the navigation | ✅ |
 
 ---
 
@@ -1348,8 +1349,11 @@ public async Task<ActionResult<List<RoleDto>>> GetRoles(string orgnr, Cancellati
   doesn't exist in the database; it's made in the `Select`, so it can only be sorted after.
   **Rule of thumb:** before the `await ...Async(ct)` you're building SQL; after it, you're working on a list.
 
-### Ordering by "power" (an idea, not in the code)
-Keep the name and a rank together, keyed by code, using a **tuple** (two named values, no class):
+### Ordering by "power" (added after 9c's commit; committed with 9d)
+Keep the name and a rank together, keyed by code, using a **tuple** (two named values, no class).
+`NameOf` / `RankOf` replaced `TextOf`. Every value must be a full pair: `("Bostyrer")` alone is just a
+string in brackets, a compile error. And `GetValueOrDefault(code, code)` no longer fits: the fallback must
+have the value's type, `(string, int)`, so each method picks its own part:
 ```csharp
 private static readonly Dictionary<string, (string Name, int Rank)> Types = new()
 {
@@ -1357,7 +1361,8 @@ private static readonly Dictionary<string, (string Name, int Rank)> Types = new(
     ["LEDE"] = ("Styrets leder", 20),
     // ...
 };
-public static int RankOf(string code) => Types.TryGetValue(code, out var t) ? t.Rank : 999;  // unknown: last
+public static string NameOf(string code) => Types.ContainsKey(code) ? Types[code].Name : code;
+public static int RankOf(string code) => Types.TryGetValue(code, out var type) ? type.Rank : 999;  // unknown: last
 ```
 ```csharp
 company.Roles!
@@ -1365,7 +1370,17 @@ company.Roles!
     .ThenBy(r => r.BirthYear ?? int.MaxValue)   // oldest first; units (no birth year) last
     .Select(r => new RoleDto(...))
 ```
-Sorted **before** the `Select`, on the entity, so the rank never reaches the JSON. In memory, C# can
+`ContainsKey` + `Types[code]` is PHP's `isset($t[$code]) ? $t[$code] : ...`: safe, the key was just
+checked; it looks up twice, `TryGetValue` once (no real difference for 12 codes).
+
+**Sort before or after the `Select`?** In memory, either. Each LINQ step works on what the step before
+produced: after the `Select` the items are `RoleDto`s, which still have `RoleType`, so
+`.OrderBy(d => RoleTypes.RankOf(d.RoleType))` works too (that's what the code does). The rank is
+*calculated* from the code; it doesn't need to be a field. What you can't do after the `Select` is sort
+by something the DTO no longer has (`r.Id`). Sorting on the entity first works whatever the DTO holds.
+(In SQL, too, ORDER BY may use columns not selected; the exception is `SELECT DISTINCT`.)
+
+Sorted here on the DTO, and the rank never reaches the JSON. In memory, C# can
 call `RankOf`. In a **database** query it can't ("could not be translated"): write it inline
 (`r.RoleType == "DAGL" ? 10 : ...` becomes SQL `CASE WHEN`) or store the rank in a `role_types` table.
 
@@ -1392,6 +1407,20 @@ public record CompanyDetailsDto(
   company): the "Cartesian explosion". `AsSplitQuery()` sends one query per collection instead.
 - Often simpler: keep `/companies/{orgnr}` lean, and let the frontend fetch `/roles` and
   `/shareholders` in parallel, only when shown.
+- **`Include` then `Fill`, the natural way** (`RoleDto.Fill` and `CompanyDetailsDto.Fill` are in
+  `Contracts/RoleDto.cs`, not used by an endpoint yet):
+  ```csharp
+  public static CompanyDetailsDto Fill(Company c) => new(
+      c.Orgnr, c.Name, c.OrgForm, c.RegistrationDate,
+      c.Roles!.Select(RoleDto.Fill).ToList());        // = Select(r => RoleDto.Fill(r))
+  ```
+  ```csharp
+  var company = await db.Companies.AsNoTracking().Include(c => c.Roles)
+      .FirstOrDefaultAsync(c => c.Orgnr == orgnr, ct);
+  return company is null ? NotFound() : CompanyDetailsDto.Fill(company);
+  ```
+  Call `Fill` **after** the `await`, on the loaded entity. Inside an EF `Select`, EF can't see into the
+  method, so it wouldn't know to fetch the roles.
 
 ```bash
 curl -s localhost:5020/api/companies/810733772/roles | jq '.[].roleName'
@@ -1399,6 +1428,153 @@ curl -si localhost:5020/api/companies/123456789/roles | head -1    # 400
 curl -si localhost:5020/api/companies/914778271/roles | head -1    # 404
 curl -s  localhost:5020/api/companies/991865500/roles              # []
 ```
+
+## Step 9d: `GET /api/roles`, the role search
+
+**Why:** search all 26k roles: "every company where a Hansen has a role", "every daglig leder born
+1970–1975", "everything Enter Revisjon AS audits". Step 4's `IQueryable` pattern, plus the company
+through the navigation `Role.Company`. I wrote most of the controller myself.
+
+**`Contracts/RoleSearchQuery.cs`:**
+```csharp
+public record RolesSearchQuery
+{
+    public string? Name { get; set; }
+    public string? RoleType { get; set; }      // comma-separated: DAGL,LEDE
+    public string? Orgnr { get; set; }         // comma-separated
+
+    [Range(1900,2100)]
+    public int? BirthYearFrom { get; set; }
+
+    [Range(1900,2100)]
+    public int? BirthYearTo { get; set; }
+
+    [Range(1, 1000)]
+    public int Page { get; set; } = 1;
+
+    [Range(1, 100)]
+    public int PageSize { get; set; } = 20;
+}
+```
+`int?` = "not given". A plain `int` would arrive as `0`, and `>= 0` would match everything.
+
+**`Contracts/RoleSearchItemDto.cs`:** like `RoleDto`, plus `Orgnr` and `CompanyName`: in a search across
+companies, every row must say whose role it is.
+```csharp
+public record RoleSearchItemDto(
+    string Orgnr, string CompanyName, string RoleType, string RoleName,
+    string? PersonName, int? BirthYear, string? UnitOrgnr, string? UnitName, bool Resigned);
+```
+
+**`Controllers/RolesController.cs`:**
+```csharp
+[ApiController]
+[Route("api/roles")]
+public class RolesController(AppDbContext db) : ControllerBase
+{
+    [HttpGet]
+    public async Task<PageResult<RoleSearchItemDto>> Search([FromQuery] RolesSearchQuery query, CancellationToken ct)
+    {
+        IQueryable<Role> roles = db.Roles.AsNoTracking();
+
+        if (!string.IsNullOrWhiteSpace(query.Name))
+        {
+            // A person or a unit: one of the two names is NULL, and NULL ILIKE ... is never true.
+            var keyword = $"%{query.Name.Trim()}%";
+            roles = roles.Where(r => EF.Functions.ILike(r.PersonName!, keyword)
+                                  || EF.Functions.ILike(r.UnitName!, keyword));
+        }
+        // Comma-separated: ?roleType=DAGL,LEDE  →  WHERE role_type = ANY(@roleTypes)
+        var roleTypes = SplitList(query.RoleType).Select(t => t.ToUpperInvariant()).ToList();
+        if (roleTypes.Count > 0)
+        {
+            roles = roles.Where(r => roleTypes.Contains(r.RoleType));
+        }
+        var orgnrs = SplitList(query.Orgnr);
+        if (orgnrs.Count > 0)
+        {
+            roles = roles.Where(r => orgnrs.Contains(r.Orgnr));
+        }
+
+        if (query.BirthYearFrom is not null)
+        {
+            roles = roles.Where(r => r.BirthYear >= query.BirthYearFrom);
+        }
+        if (query.BirthYearTo is not null)
+        {
+            roles = roles.Where(r => r.BirthYear <= query.BirthYearTo);
+        }
+
+        var total = await roles.CountAsync(ct);
+        var items = await roles
+            .OrderBy(r => r.Company!.Name)
+            .ThenBy(r => r.RoleType)
+            .ThenBy(r => r.Id) // a unique last key: every page is stable
+            .Skip((query.Page - 1) * (query.PageSize))
+            .Take(query.PageSize)
+            .Select(r => new RoleSearchItemDto(
+                r.Company!.Orgnr, r.Company!.Name, r.RoleType, RoleTypes.NameOf(r.RoleType),
+                r.PersonName, r.BirthYear, r.UnitOrgnr, r.UnitName, r.Resigned) )
+            .ToListAsync(ct);
+
+        return new PageResult<RoleSearchItemDto>(items, query.Page, query.PageSize, total);
+    }
+
+    // "DAGL, lede,,MEDL" → ["DAGL", "lede", "MEDL"]; null or blank → []
+    private static List<string> SplitList(string? value) =>
+        string.IsNullOrWhiteSpace(value)
+            ? []
+            : value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+}
+```
+
+**What's new compared with step 4:**
+- **`r.Company!.Name`: the navigation "upwards", without `Include`.** Using it in `OrderBy`/`Select` is
+  enough; EF writes `FROM roles r INNER JOIN companies c ON r.orgnr = c.orgnr ORDER BY c.name, r.role_type, r.id`.
+  **INNER** because every role has a company (required FK); 9c's was LEFT because a company may have no roles.
+- **Person or unit in one filter:** `WHERE person_name ILIKE @p OR unit_name ILIKE @p`. One is always
+  NULL and `NULL ILIKE` is never true. The `!` only quiets the compiler.
+- **Birth years leave out units by themselves:** `birth_year >= 1970` is never true for NULL.
+- **Comma-separated lists:** `Split` with `RemoveEmptyEntries | TrimEntries` (the `|` combines options)
+  = PHP's `array_filter(array_map('trim', explode(',', $v)))`. `list.Contains(r.Column)` in a `Where`
+  becomes `= ANY(@list)` (SQL's `IN`), as in step 7. **`Count > 0` check:** `?roleType= , ` splits
+  into an empty list, and "one of []" matches nothing (0 rows); with the check the filter is skipped.
+  Another common style: repeat the parameter (`?roleType=DAGL&roleType=LEDE`), which ASP.NET binds to
+  a `List<string>` by itself, no `Split`.
+- **`.Select(...).ToList()` on a list:** `SplitList` returns a `List`, but `Select` returns a lazy
+  `IEnumerable` (a recipe, run when read), so `ToList()` makes it a list again, with `Count`.
+  `Select` *is* the mapping (`array_map`). A list also has its own map that returns a list:
+  `SplitList(query.RoleType).ConvertAll(t => t.ToUpperInvariant())`.
+- **`ThenBy(r => r.Id)`, stable paging:** sorting only by company name has ties (7 roles per company),
+  and tied rows may come in a different order on each query, so `Skip/Take` can repeat or skip a row
+  between pages. A unique last key fixes the order.
+- **No `RankOf` here:** this is a database query, and SQL can't call a C# method in `OrderBy`
+  ("could not be translated"). `RoleTypes.NameOf` in the **final `Select`** is fine: EF runs it in C#
+  on each row after the SQL.
+- `CountAsync` before `OrderBy`/`Skip`: the count needs no JOIN and no sorting.
+- `r.Company!.Orgnr` and `r.Orgnr` are the same value; `r.Orgnr` is already on the role.
+
+```bash
+curl -s "localhost:5020/api/roles?pageSize=3" | jq '.totalCount'                    # 26472
+curl -s "localhost:5020/api/roles?name=hansen" | jq '.totalCount'                   # 514 (persons)
+curl -s "localhost:5020/api/roles?name=revisjon" | jq '.totalCount'                 # 1409 (units)
+curl -s "localhost:5020/api/roles?roleType=dagl,lede" | jq '.totalCount'            # 12256 = 5046 + 7210
+curl -s "localhost:5020/api/roles?roleType=dagl&birthYearFrom=1970&birthYearTo=1975" | jq '.totalCount'  # 892
+curl -si "localhost:5020/api/roles?pageSize=500" | head -1                          # 400
+```
+A raw `Ø` in a curl URL gives 400 (curl doesn't encode it); `curl -G --data-urlencode "roleType=FFØR"`
+works, and browsers / `fetch` encode by themselves.
+
+### For later: one role DTO for every endpoint
+Separate DTOs per response shape (`RoleDto`, `RoleSearchItemDto`) make the "shape per endpoint" idea
+clear while learning. In real projects, **one DTO that always returns everything** is common and fine:
+9c would repeat the same orgnr and company name on each row, harmless. To hide a field where it's empty:
+```csharp
+[JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+public string? CompanyName { get; init; }
+```
+Leave it null in 9c and it disappears from the JSON. The cost: the field becomes optional in the
+frontend type, and the contract no longer says what each endpoint returns. A practice3 idea.
 
 ---
 
@@ -1422,3 +1598,5 @@ curl -s  localhost:5020/api/companies/991865500/roles              # []
 | 9b | `-o Date/Migrations`, then deleted the folder by hand | The snapshot kept the change, so the next `add` was empty. Use `migrations remove`: it reverts the snapshot too |
 | 9b | `await Task.WhenAll(calls).ToDictionaryAsync()` | `ToDictionaryAsync` is EF's, for database queries. `WhenAll` returns a plain array; key by orgnr by making `calls` a dictionary |
 | 9c | `Names[code] ?? code` | A C# dictionary indexer throws for a missing key; `??` never runs. Use `GetValueOrDefault(code, code)` |
+| 9c | `("Bostyrer")` in a `(string Name, int Rank)` dictionary; `GetValueOrDefault(code, code)` | A tuple value needs both parts; the fallback must have the value's type, so pick `.Name` / `.Rank` |
+| 9d | `?roleType= , ` gave 0 rows | A non-blank string can split into an empty list; check `Count > 0` before filtering |

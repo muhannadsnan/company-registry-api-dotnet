@@ -1,6 +1,9 @@
 namespace Practice2.Api.Contracts;
 
-public record RoleDto(
+// One role, with the company it belongs to.
+public record RoleSearchItemDto(
+    string Orgnr,
+    string CompanyName,
     string RoleType,
     string RoleName,
     string? PersonName,
