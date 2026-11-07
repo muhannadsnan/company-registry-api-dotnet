@@ -19,6 +19,7 @@ each part is there. The step list is in [PRACTICE-PLAN.md](PRACTICE-PLAN.md); th
 | 9c | `GET /api/companies/{orgnr}/roles`: `Include`, a code → name dictionary, 400/404/200 `[]` | ✅ |
 | 9d | `GET /api/roles` search: person-or-unit name, comma-separated lists, birth-year range, the company via the navigation | ✅ |
 | 10 | `users` table: unique username, PBKDF2 password hash, space-separated scopes; a hash tool | ✅ |
+| 11a | `JwtOptions`: typed settings, the signing key in user-secrets, validated at startup | ✅ |
 
 ---
 
@@ -1683,6 +1684,102 @@ never encrypted; login re-hashes and compares. Scopes are stored per user and go
 
 ---
 
+## Step 11a: `JwtOptions`, the typed JWT settings
+
+**Why:** step 11 logs users in and returns a **JWT**: a signed token carrying `sub`, `name` and the
+user's `scope`s. The API checks the signature on every request, with no database lookup. 11a is only the
+settings (issuer, audience, signing key, lifetime), and the app **refuses to start** when they're wrong.
+
+```bash
+dotnet add package Microsoft.AspNetCore.Authentication.JwtBearer --version 10.0.13
+```
+It *validates* tokens (11d) and brings the `JsonWebTokenHandler` that *creates* them (11b).
+
+**`Auth/JwtOptions.cs`:**
+```csharp
+public class JwtOptions
+{
+    public const string Section = "Jwt";
+
+    [Required]
+    public string Issuer { get; set; } = "";
+
+    [Required]
+    public string Audience { get; set; } = "";
+
+    [Required, MinLength(32)]
+    public string SigningKey { get; set; } = "";
+
+    [Range(1, 1440)]
+    public int LifetimeMinutes { get; set; } = 120;
+}
+```
+- The **options pattern**: one config section becomes a typed, validated class. Laravel's
+  `config('jwt.issuer')`, but a class instead of loose array keys.
+- `MinLength(32)`: HMAC-SHA256 needs a key of at least 256 bits (32 bytes).
+- `Section`: the string `"Jwt"` is written once.
+
+**`appsettings.json`: everything except the key**
+```json
+"Jwt": {
+  "Issuer": "practice2-api",
+  "Audience": "practice2-api",
+  "LifetimeMinutes": 120
+}
+```
+Issuer = who made the token, audience = who it's for. The same API here.
+
+**The key: user-secrets**, a `.env` outside the repo:
+```bash
+dotnet user-secrets init                     # adds <UserSecretsId> to the .csproj, once
+dotnet user-secrets set "Jwt:SigningKey" "$(openssl rand -base64 48)"
+dotnet user-secrets list
+```
+- Stored in `~/.microsoft/usersecrets/<id>/secrets.json`, so it can't be committed. The id is only that
+  folder's name: it stays the same, and it's safe to commit.
+- Every `openssl rand` gives a **new** key. Tokens signed with the old key stop working: that's how you
+  rotate the key, or log everyone out at once.
+- **Not a vault:** a plain JSON file, loaded only in Development. In production the key comes from an
+  environment variable (`Jwt__SigningKey`, where `__` is the section separator) or a secret store.
+- Config is layered: appsettings.json → appsettings.{Environment}.json → user-secrets → environment
+  variables. Later sources win.
+
+**`Program.cs`:**
+```csharp
+builder.Services.AddOptions<JwtOptions>()
+    .Bind(builder.Configuration.GetSection(JwtOptions.Section))
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
+```
+```
+appsettings.json  "Jwt": { "Issuer", "Audience", "LifetimeMinutes" }
+user-secrets      "Jwt:SigningKey"
+                      ↓ merged into one "Jwt" section
+JwtOptions        Issuer, Audience, LifetimeMinutes, SigningKey
+```
+- `GetSection("Jwt")`: that section from **all sources, merged**, which is why the secret's key lands
+  next to appsettings' values.
+- `Bind`: a key fills the property with the same name (**case-insensitive**).
+- `AddOptions<JwtOptions>()`: registers it in DI; `TokenService` (11b) asks for `IOptions<JwtOptions>`.
+- `ValidateDataAnnotations` runs the attributes; `ValidateOnStart` runs them **at boot**.
+- PHP: `new JwtOptions(...config('jwt'))`, built once, validated, injected.
+
+Checked: with the key removed, `dotnet run` crashes in `StartupValidator.Validate()` (exit code 134);
+with it set again, the app starts.
+
+### Why the key matters, and why the app fails at startup
+- **Whoever has the key can forge a token** for any user with any scope, without a password. HMAC is
+  *symmetric*: one key signs and verifies.
+- **Fail fast:** a missing key breaks the deploy in the first second. Otherwise the app looks healthy and
+  the first login gets a 500 hours later.
+- **The expiry matters more for a JWT:** nothing is looked up, so a stolen token can't be revoked. Its
+  lifetime limits the damage.
+
+**Interview line:** "JWT settings are a typed options class, validated at startup. The signing key is in
+user-secrets locally and an environment variable in production, never in the repo."
+
+---
+
 ## Mistakes and what they taught
 
 | Step | Mistake | Lesson |
@@ -1705,3 +1802,4 @@ never encrypted; login re-hashes and compares. Scopes are stored per user and go
 | 9c | `Names[code] ?? code` | A C# dictionary indexer throws for a missing key; `??` never runs. Use `GetValueOrDefault(code, code)` |
 | 9c | `("Bostyrer")` in a `(string Name, int Rank)` dictionary; `GetValueOrDefault(code, code)` | A tuple value needs both parts; the fallback must have the value's type, so pick `.Name` / `.Rank` |
 | 9d | `?roleType= , ` gave 0 rows | A non-blank string can split into an empty list; check `Count > 0` before filtering |
+| 11a | `"LifeTimeMinutes"` in appsettings.json for `LifetimeMinutes` | It still bound: config keys are case-insensitive. Match the spelling anyway, so a search finds both |

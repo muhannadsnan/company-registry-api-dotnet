@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Practice2.Api.Data;
 using Practice2.Api.Import;
+using Practice2.Api.Auth;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -21,6 +22,11 @@ builder.Services.AddScoped<CompanyImporter>();
 builder.Services.AddScoped<RoleImporter>();
 builder.Services.AddSingleton<ImportQueue>();
 builder.Services.AddHostedService<ImportWorker>();
+
+builder.Services.AddOptions<JwtOptions>()
+    .Bind(builder.Configuration.GetSection(JwtOptions.Section))
+    .ValidateDataAnnotations()
+    .ValidateOnStart();
 
 
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
