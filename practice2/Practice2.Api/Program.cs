@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Practice2.Api.Data;
 using Practice2.Api.Import;
 using Practice2.Api.Auth;
+using Microsoft.AspNetCore.Identity;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -27,6 +28,8 @@ builder.Services.AddOptions<JwtOptions>()
     .Bind(builder.Configuration.GetSection(JwtOptions.Section))
     .ValidateDataAnnotations()
     .ValidateOnStart();
+builder.Services.AddSingleton<TokenService>();    
+builder.Services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();    
 
 
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi

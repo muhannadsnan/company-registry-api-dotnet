@@ -1,7 +1,8 @@
 # Practice2 notes: the API, step by step
 
 The second rebuild of the API, in `practice2/`. One section per step: the commands, the code, and why
-each part is there. The step list is in [PRACTICE-PLAN.md](PRACTICE-PLAN.md); the concepts are in
+each part is there. The table below is the step list, including the steps still to come; the React steps
+and the later rounds are in [What comes next](#what-comes-next). The concepts are in
 [DOTNET-CONCEPTS.md](DOTNET-CONCEPTS.md) (referred to as "concept N").
 
 | Step | What | Status |
@@ -20,6 +21,11 @@ each part is there. The step list is in [PRACTICE-PLAN.md](PRACTICE-PLAN.md); th
 | 9d | `GET /api/roles` search: person-or-unit name, comma-separated lists, birth-year range, the company via the navigation | ✅ |
 | 10 | `users` table: unique username, PBKDF2 password hash, space-separated scopes; a hash tool | ✅ |
 | 11a | `JwtOptions`: typed settings, the signing key in user-secrets, validated at startup | ✅ |
+| 11b | `TokenService`: claims, expiry, HMAC signature; what's inside a JWT | ✅ |
+| 11c | `POST /api/auth/login`: verify the hash, the same 401 for an unknown user and a wrong password | ✅ |
+| 11d | JWT validation, scope policies on the endpoints, 401/403 | ⏳ |
+| 12 | Correlation id middleware and structured logs | ⏳ |
+| 13 | Integration tests, also a login test and a roles test | ⏳ |
 
 ---
 
@@ -1780,6 +1786,206 @@ user-secrets locally and an environment variable in production, never in the rep
 
 ---
 
+## Step 11b: `TokenService`, which creates the JWT
+
+**Why:** 11c's login needs one call that turns a `User` into a signed token. The service builds the
+claims, sets the expiry and signs, using 11a's `JwtOptions`.
+
+**`Contracts/LoginResponse.cs`:**
+```csharp
+public record LoginResponse(string Token, DateTimeOffset ExpiresAt, string Username, string[] Scopes);
+```
+The frontend gets the expiry and the scopes next to the token, so it can hide the Import button without
+decoding the token.
+
+**`Auth/TokenService.cs`:**
+```csharp
+public class TokenService(IOptions<JwtOptions> options)
+{
+    // Used here to sign, and in 11d to validate: the same key both ways (HMAC is symmetric).
+    public static SymmetricSecurityKey CreateSigningKey(JwtOptions jwt) =>
+        new(Encoding.UTF8.GetBytes(jwt.SigningKey));
+
+    public LoginResponse CreateToken(User user)
+    {
+        var jwt = options.Value;
+        var scopes = user.Scopes.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var expiresAt = DateTimeOffset.UtcNow.AddMinutes(jwt.LifetimeMinutes);
+
+        var claims = new List<Claim>
+        {
+            new("sub", user.Id.ToString()),
+            new("name", user.Username),
+        };
+        claims.AddRange(scopes.Select(scope => new Claim("scope", scope)));
+
+        var token = new JsonWebTokenHandler().CreateToken(new SecurityTokenDescriptor
+        {
+            Issuer = jwt.Issuer,
+            Audience = jwt.Audience,
+            Subject = new ClaimsIdentity(claims),
+            Expires = expiresAt.UtcDateTime,
+            SigningCredentials = new SigningCredentials(CreateSigningKey(jwt), SecurityAlgorithms.HmacSha256)
+        });
+
+        return new LoginResponse(token, expiresAt, user.Username, scopes);
+    }
+}
+```
+- **A claim** is one fact about the user, a type + value pair. `sub` (subject) = the user id, a standard
+  JWT name. **One `scope` claim per scope**, so 11d can ask "is there a `scope` claim `companies.import`?".
+- `claims.AddRange(scopes.Select(...))` = JS `claims.push(...scopes.map(s => ...))`.
+- `Expires` becomes the `exp` claim (a Unix timestamp); validation rejects the token after it.
+- PHP: `firebase/php-jwt`'s `JWT::encode($payload, $key, 'HS256')`, with typed claims.
+
+**`Program.cs`:** `builder.Services.AddSingleton<TokenService>();`
+
+### What's inside a JWT
+My TokenService, run in a scratch app with a throwaway key, then decoded **without the key**:
+```
+eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9 . eyJhdWQiOiJwcmFjdGljZTIt... . Gpg_9vlwZgCmwS8NT3WSzq2z...
+
+part 1 → {"alg":"HS256","typ":"JWT"}
+part 2 → {"aud":"practice2-api","iss":"practice2-api","exp":1794133423,"sub":"1","name":"admin",
+          "scope":["companies.read","companies.import"],"iat":1794126223,"nbf":1794126223}
+```
+- **header.payload.signature.** The header says how it was signed; the payload holds the claims; the
+  signature is HMAC-SHA256 of `header.payload` with the key.
+- > **The payload is not encrypted, only base64url-encoded.** Anyone with the token can read it (jwt.io).
+  > The key gives **integrity**, not secrecy: without it nobody can change or create a token. So **no
+  > secrets in the claims.** Like a signed (not encrypted) Laravel cookie.
+- The two `scope` claims became one JSON array: the handler merges claims of the same type. Validation
+  splits them back into two claims (11d).
+- `iat` = issued at, `nbf` = not valid before. The handler adds them itself.
+
+### Revoking: the JWT trade-off
+The token says `companies.import` until its `exp`, even if the scope is removed in the database: the API
+never asks the database. The usual fixes: a short access token (e.g. 15 min) plus a refresh token that
+*is* checked against the database, or a lookup per request (and the "stateless" benefit is gone).
+
+### Why a singleton
+Not because it's "called at any time": scoped services are too. `TokenService` keeps **no per-request
+state** and depends only on singletons (`IOptions<T>`). The rule the other way: a singleton must never
+take a scoped service like `AppDbContext` (a captive dependency, concept 1). So in 11c the **controller**
+gets the DbContext and passes only the `User` to `TokenService`.
+
+### Two ways to write `new`
+Neither is an anonymous object; both are normal constructor calls.
+```csharp
+// Target-typed new (C# 9): the type comes from where the value goes, here the return type.
+public static SymmetricSecurityKey CreateSigningKey(JwtOptions jwt) =>
+    new(Encoding.UTF8.GetBytes(jwt.SigningKey));      // = new SymmetricSecurityKey(...)
+
+// Object initializer (C# 3): the parameterless constructor, then property assignments.
+var d = new SecurityTokenDescriptor { Issuer = jwt.Issuer, Audience = jwt.Audience };
+// = var d = new SecurityTokenDescriptor(); d.Issuer = jwt.Issuer; d.Audience = jwt.Audience;
+```
+| Form | Meaning |
+|---|---|
+| `new X(a, b)` | constructor arguments |
+| `new(a, b)` | the same, with the type taken from the target |
+| `new X { P = a }` | empty constructor, then property assignments |
+| `new X(a) { P = b }` | both |
+| `new { Name = "x" }` | an **anonymous** object: no type name, read-only, local only |
+
+- `new("sub", ...)` inside `new List<Claim> { ... }` is `new Claim(...)`: the list says the type.
+- **An initializer still needs setters.** It assigns the properties, so they need `set` (or `init`, C# 9:
+  settable only in the initializer). What it removes is the constructor that only copies its parameters
+  into properties. `required` (C# 11) makes the compiler check that you set them in the `{ }`.
+- JS: `Object.assign(new X(), { issuer, audience })`. PHP has no equivalent; `new X(issuer: ...)` named
+  arguments still go through the constructor.
+- A class with many optional settings (`SecurityTokenDescriptor` has about 15) offers a parameterless
+  constructor + settable properties, and you set only what you need.
+
+**Interview line:** "A JWT is signed, not encrypted: the signature proves nobody changed the claims, so
+no secrets go in them. The token carries the scopes, so it can't be revoked before it expires; keep it
+short-lived."
+
+---
+
+## Step 11c: `POST /api/auth/login`
+
+**Why:** the first endpoint that uses steps 10, 11a and 11b together: find the user, check the password
+against the hash, return 11b's token.
+
+**`Contracts/LoginRequest.cs`:**
+```csharp
+using System.ComponentModel.DataAnnotations;
+
+public record LoginRequest([Required] string Username, [Required] string Password);
+```
+`[Required]`, `[Range]`, `[MinLength]` are classes in `System.ComponentModel.DataAnnotations`
+(`RequiredAttribute`; the `Attribute` suffix is dropped when you use one). The `using` makes them
+visible. An attribute does nothing by itself; something reads it: `[ApiController]` for request models
+(400), `ValidateDataAnnotations()` for options (11a), EF for max lengths. PHP 8: `#[Assert\NotBlank]`.
+
+**`Program.cs`:**
+```csharp
+builder.Services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();
+```
+- Two type parameters: **interface → implementation**. "Whoever asks for `IPasswordHasher<User>` gets a
+  `PasswordHasher<User>`." The controller depends on the interface, so a test can pass in a fake.
+- **Singleton** for the same reason as `TokenService`: no per-request state, nothing scoped inside, safe
+  to share between threads. Scoped would work too, just with one new object per request for nothing.
+- A singleton is an **object**, not a thread: built the first time something asks for it, kept until the
+  app stops, and used by many requests (on many threads) at once. That's why it must be stateless.
+- No package needed: it's in ASP.NET Core, the same class as the hash tool.
+
+**`Controllers/AuthController.cs`:**
+```csharp
+[ApiController]
+[Route("api/auth")]
+public class AuthController(AppDbContext db, IPasswordHasher<User> hasher, TokenService tokens) : ControllerBase
+{
+    [HttpPost("login")]
+    public async Task<ActionResult<LoginResponse>> Login(LoginRequest request, CancellationToken ct)
+    {
+        var user = await db.Users.AsNoTracking()
+            .FirstOrDefaultAsync(u => u.Username == request.Username, ct);
+
+        // The same answer for an unknown user and a wrong password, so callers can't find out which usernames exist.
+        if (user is null || hasher.VerifyHashedPassword(user, user.PasswordHash, request.Password) == PasswordVerificationResult.Failed)
+            return Problem(statusCode: StatusCodes.Status401Unauthorized, title: "Wrong username or password");
+
+        return tokens.CreateToken(user);
+    }
+}
+```
+- `LoginRequest request` without `[FromBody]`: `[ApiController]` reads a complex type from the JSON body.
+- `user is null || ...`: `||` stops early, so `user.PasswordHash` is never read on a null user.
+- `VerifyHashedPassword` returns `Success`, `Failed` or `SuccessRehashNeeded` ("right, but hashed with
+  older settings: save a new hash"). So the check is `== Failed`, not `!= Success`.
+- The controller gets the scoped DbContext and gives the singleton `TokenService` only the `User`.
+
+### The four questions
+- **Unknown user vs wrong password: the same 401.** Different answers ("no such user") let anyone test
+  which usernames exist (*user enumeration*), and then guess passwords only for those.
+- **How the check works without decrypting:** the stored hash contains its salt and iteration count.
+  `VerifyHashedPassword` hashes the attempt **with that same salt** and compares. (A new random salt is
+  only for *new* hashes, which is why the same password gave two different hashes in step 10.)
+- **`Admin` vs `admin`:** Postgres `=` is case-sensitive, so `Admin` gets 401. Usernames are usually
+  case-insensitive: store them lower-case and normalise the input (`Trim().ToLowerInvariant()`), the same
+  lesson as `orgForm` in step 4. Passwords are always case-sensitive.
+- **Why POST:** not for encryption; **HTTPS** encrypts GET and POST alike. A query string ends up in server
+  access logs, proxy logs, browser history and the `Referer` header; a body doesn't. And a login creates
+  something (a token), which isn't a GET's job.
+
+### Checked
+Run on a spare port with a temporary user, deleted afterwards:
+```
+wrong password  401 {"title":"Wrong username or password","status":401,...}
+unknown user    401 (the same body)
+{}              400 {"Password":["The Password field is required."],"Username":[...]}
+Tmp-Verify      401 (case-sensitive)
+right password  200 {"token":"eyJhbGciOiJIUzI1NiIs...","expiresAt":"...","username":"tmp-verify","scopes":[...]}
+```
+Paste the token into jwt.io to see the claims from 11b.
+
+**Interview line:** "Login looks the user up, verifies the PBKDF2 hash, and returns the same 401 for an
+unknown user and a wrong password, so usernames can't be enumerated."
+
+---
+
 ## Mistakes and what they taught
 
 | Step | Mistake | Lesson |
@@ -1803,3 +2009,47 @@ user-secrets locally and an environment variable in production, never in the rep
 | 9c | `("Bostyrer")` in a `(string Name, int Rank)` dictionary; `GetValueOrDefault(code, code)` | A tuple value needs both parts; the fallback must have the value's type, so pick `.Name` / `.Rank` |
 | 9d | `?roleType= , ` gave 0 rows | A non-blank string can split into an empty list; check `Count > 0` before filtering |
 | 11a | `"LifeTimeMinutes"` in appsettings.json for `LifetimeMinutes` | It still bound: config keys are case-insensitive. Match the spelling anyway, so a search finds both |
+| 11b | Thought the JWT payload is encrypted and only the key holder can read the scopes | It's base64url: anyone can read it. The key only stops changes and forgeries. No secrets in claims |
+| 11c | "POST protects the login data" | HTTPS encrypts GET and POST alike. POST keeps the password out of URLs, which end up in logs, history and `Referer` |
+
+---
+
+## What comes next
+
+### The rounds
+| Round | Folder | How |
+|---|---|---|
+| practice | `practice/` | Done (Oct–Nov 2026). Guided by an AI tutor, I typed every line. |
+| practice2 | `practice2/` | Guided again, with the new `roles` table, and the login split into small steps. |
+| practice3 | `practice3/` | Fewer hints, persons derived from roles, timed drills. |
+| A full project | a new repo | When I'm fluent: a complete project with Docker and CI/CD, from [COMPANY-REGISTRY-NOTES.md](COMPANY-REGISTRY-NOTES.md), without AI. |
+
+### practice2: React
+| Step | What | New in this round |
+|---|---|---|
+| 1 | Create the app (Vite, React, TypeScript), Prettier, and a proxy to the API | Proxy without tokens from the start |
+| 2 | Login page: form, `POST /api/auth/login`, save the session in `localStorage` | from the old step 11 |
+| 3 | `apiFetch` sends the token, and a typed API client | from the old step 11 |
+| 4 | Search form with loading and error states | |
+| 5 | Paging, with a component and props | |
+| 6 | Router and the company page (400/404) | |
+| 7 | **Roles on the company page** | new |
+| 8 | Search kept in the URL | |
+| 9 | Layout route (header, footer, `<Outlet />`) | |
+| 10 | Auth context, route guard, username and Log out in the header | from the old step 11 |
+| 11 | Token expiry: automatic logout, and a 401 sends you to the login page | from the old step 11 |
+| 12 | Import page with polling (link only for users with `companies.import`) | |
+
+### practice3 (ideas)
+- **Persons derived from roles:** a `persons` table, and roles that point to it.
+  - The hard part: Brreg gives no national ID number, so the same person can only be matched by name +
+    birth date, and that isn't always unique. A real data-modelling problem.
+  - Search a person and see all their companies.
+- Fewer hints: I write each step first, then compare with the guide.
+- Timed drills, 45 minutes each: a CRUD endpoint with EF Core and a test; a React page that fetches,
+  lists and filters.
+- Mock interviews: a task without code, then a review like an interviewer would give.
+
+### practice4 (ideas)
+- **History tables:** when a role appeared or disappeared, and a company's earlier names. Brreg gives no
+  start or end dates for roles (only `avregistrert`), so the importer records when it *saw* a change.

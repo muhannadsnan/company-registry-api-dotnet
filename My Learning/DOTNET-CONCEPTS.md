@@ -16,7 +16,9 @@ Nobody calls `new` on services.
 typed. You don't load anything; you ask for it in the constructor.
 
 **Lifetimes:**
-- `Singleton`: one instance for the whole app (`ImportQueue`, so producer and consumer share one channel).
+- `Singleton`: one instance for the whole app (`ImportQueue`, so producer and consumer share one channel; a
+  stateless `TokenService` whose only dependency is `IOptions<T>`). Pick it when there's no per-request state and
+  every dependency is a singleton too.
 - `Scoped`: one instance per HTTP request (`AppDbContext`, `CompanyImporter`).
 - `Transient`: new every time it's asked for.
 
@@ -152,6 +154,10 @@ and Microsoft's newer default; this repo uses them for `/health` and `/docs`.
 - **Nullable reference types:** `string` means "never null", `string?` means "may be null", and the compiler warns
   if you might dereference null. It's on in the `.csproj` (`<Nullable>enable</Nullable>`).
 - `required`: the compiler forces you to set the property when you create the object (`Company.OrganisationNumber`).
+- **Creating objects:** `new(a, b)` is *target-typed new* (C# 9): the type comes from the variable or return type.
+  `new X { P = a }` is an *object initializer* (C# 3): the empty constructor, then property assignments, so the
+  properties need `set` or `init`. It replaces constructors that only copy parameters into properties; `required`
+  checks that the `{ }` sets them. `new { P = a }` (no type name) is an anonymous object. JS: `Object.assign(new X(), {...})`.
 
 **Analogy:** TypeScript's `string | null` and strict null checks.
 
