@@ -8,6 +8,7 @@ public enum ImportStatus
 public class ImportRun
 {
     public long Id { get; set; }
+    public string? CorrelationId { get; set; }
     public ImportStatus Status { get; set; }
     public DateTimeOffset QueuedAt { get; set; }
     public DateTimeOffset? StartedAt { get; set; }

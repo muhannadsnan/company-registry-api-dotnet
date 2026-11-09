@@ -4,6 +4,7 @@ namespace Practice2.Api.Contracts;
 
 public record ImportRunDto(
     long Id,
+    string? CorrelationId,
     string Status,
     DateTimeOffset QueuedAt,
     DateTimeOffset? StartedAt,
@@ -17,6 +18,6 @@ public record ImportRunDto(
     string? Error)
 {
     public static ImportRunDto Fill(ImportRun r) => new(
-        r.Id, r.Status.ToString(), r.QueuedAt, r.StartedAt, r.FinishedAt,
+        r.Id, r.CorrelationId, r.Status.ToString(), r.QueuedAt, r.StartedAt, r.FinishedAt,
         r.Read, r.Inserted, r.Updated, r.Unchanged, r.Rejected, r.RolesSaved, r.Error);
 }

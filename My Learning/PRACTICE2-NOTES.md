@@ -26,7 +26,7 @@ and the later rounds are in [What comes next](#what-comes-next). The concepts ar
 | 11d | JWT validation, scope policies on the endpoints, 401/403 | ✅ |
 | 11e | A fallback policy: every endpoint needs a login unless it's marked open; the company page is public | ✅ |
 | 12a | Correlation id middleware: a validated id in a log scope and the response header, one structured line per request | ✅ |
-| 12b | The correlation id carried into the import worker through `import_runs` | ⏳ |
+| 12b | The correlation id carried into the import worker through `import_runs` | ✅ |
 | 13 | Integration tests, also a login test and a roles test | ⏳ |
 
 ---
@@ -2299,6 +2299,78 @@ logging scope and the response header, and logs one structured line per request 
 
 ---
 
+## Step 12b: the correlation id carried into the import worker
+
+**Why:** the 12a scope covers one request. `POST /api/imports` answers 202 in milliseconds, but the
+import runs for minutes in `ImportWorker`, so the worker's lines had no id. If a run failed, nothing
+linked it to the request that started it.
+
+**Why the 12a scope doesn't reach the worker:**
+- `ImportWorker` was started once at app startup, not inside the request. A `BeginScope` only covers
+  code in the same async flow, so the worker's loop never sees it.
+- The request is over before the import starts: the 202 is sent and the middleware's `using` closes the
+  scope.
+- The channel carries only the run id (`long`), not the context.
+
+**Why store it on the row, not in the Channel item:**
+- **It's stored:** the Channel lives in memory and is gone after a restart; the row stays.
+- **It's visible:** `GET /api/imports/{id}` returns `correlationId`, so a run leads back to its request.
+- **It's free:** the worker already loads the row by id, and the channel's type stays the same.
+
+**`Data/ImportRun.cs` + `AppDbContext`:**
+```csharp
+public string? CorrelationId { get; set; }                    // nullable: older runs have none
+impRun.Property(r => r.CorrelationId).HasMaxLength(64);       // the same 64 the middleware allows
+```
+Migration `AddImportRunCorrelationId` = one `ALTER TABLE import_runs ADD correlation_id varchar(64) NULL`.
+
+**`Controllers/ImportsController.cs`:** `TraceIdentifier` is the id the middleware set in 12a:
+```csharp
+var run = new ImportRun
+{
+    Status = ImportStatus.Queued,
+    QueuedAt = DateTimeOffset.UtcNow,
+    CorrelationId = HttpContext.TraceIdentifier
+};
+```
+
+**`Contracts/ImportRunDto.cs`:** `string? CorrelationId` after `Id`, filled with `r.CorrelationId`.
+
+**`Import/ImportWorker.cs`:** a new scope per run, right after the row is loaded:
+```csharp
+var run = await db.ImportRuns.FindAsync([runId], stoppingToken);
+if (run is null)
+    continue;
+
+using var logScope = logger.BeginScope(
+    "ImportRun {RunId}, CorrelationId {CorrelationId}", runId, run.CorrelationId);
+```
+- Inside the `await foreach` body, so it ends with each run and the next run gets its own.
+- It covers **every logger** called in that flow, not only `ImportWorker`'s: the importers, EF's SQL,
+  `HttpClient` and Polly.
+- `RunId` in it too, so the logs can be searched by run as well.
+
+### Checked
+```
+POST /api/imports  X-Correlation-ID: import-test-1      → 202, body "correlationId": "import-test-1"
+GET  /api/imports  → run 14 Running, then Succeeded, still "import-test-1"
+\d import_runs     → correlation_id character varying(64), nullable
+second POST while one runs → 409, with its own new X-Correlation-ID
+```
+Run 15 (`import-verify-12b`): 39 179 log lines carry `=> ImportRun 15, CorrelationId import-verify-12b`:
+`ImportWorker` (2), `CompanyImporter` (15), `RoleImporter` (15), EF (2 912), and HttpClient/Polly
+(7 247 each). The request line has the same id in its 12a scope. **One search finds the request and the
+whole import.**
+
+The 39 179 lines were mostly HttpClient's: 4 lines per Brreg page at Information. One line in
+`appsettings.json` hides them if wanted: `"System.Net.Http.HttpClient": "Warning"` under
+`Logging:LogLevel`.
+
+**Interview line:** "The correlation id is stored on the import run, so the background worker opens a
+log scope with it and every line of the import can be traced to the request that queued it."
+
+---
+
 ## Mistakes and what they taught
 
 | Step | Mistake | Lesson |
@@ -2328,6 +2400,7 @@ logging scope and the response header, and logs one structured line per request 
 | 11d | "The API finds the key through `UserSecretsId`" | That's only where development stores it. The API signs and checks with the same `JwtOptions.SigningKey` |
 | 12a | `namespace Practice2.Api.Inrastructure`, then fixed in the file but not in Program.cs's `using` | A namespace typo compiles but shows in every log category; renaming it breaks every `using` of it |
 | 12a | `LifetimeMinutes` back to `LifeTimeMinutes` in appsettings.json | Read `git diff` before committing: it shows changes you didn't mean to make |
+| 12b | "The row is better because it's the last thing before the logger writes" | The row wins because it's stored (survives a restart), visible (`GET /api/imports/{id}`) and already loaded by the worker |
 
 ---
 

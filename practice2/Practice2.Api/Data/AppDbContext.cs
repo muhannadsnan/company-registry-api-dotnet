@@ -23,6 +23,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         {
             impRun.Property(r => r.Status).HasConversion<string>().HasMaxLength(20);
             impRun.Property(r => r.Error).HasMaxLength(2000);
+            impRun.Property(r => r.CorrelationId).HasMaxLength(64);
         });
 
         modelBuilder.Entity<Role>(role =>

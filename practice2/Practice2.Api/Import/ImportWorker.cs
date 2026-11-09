@@ -18,13 +18,15 @@ public class ImportWorker(
             // a fresh scope per RUN gives a fresh DbContext and importer.
             await using var scope = scopeFactory.CreateAsyncScope();
             var db = scope.ServiceProvider.GetRequiredService<AppDbContext>(); // this function gives "fresh" one
-            var importer = scope.ServiceProvider.GetRequiredService<CompanyImporter>(); // this function gives "fresh" one
+            var companyImporter = scope.ServiceProvider.GetRequiredService<CompanyImporter>(); // this function gives "fresh" one
             var roleImporter = scope.ServiceProvider.GetRequiredService<RoleImporter>();
 
             var run = await db.ImportRuns.FindAsync([runId], stoppingToken);
             if (run is null)
                 continue;
 
+            using var logScope = logger.BeginScope(
+                    "ImportRun {RunId}, CorrelationId {CorrelationId}", runId, run.CorrelationId);
             run.Status = ImportStatus.Running;
             run.StartedAt = DateTimeOffset.UtcNow;
             await db.SaveChangesAsync(stoppingToken);
@@ -35,7 +37,7 @@ public class ImportWorker(
             string? error = null;
             try
             { // this RunSync() has a Clear() after every page, which forces use of Attach() later
-                summary = await importer.RunAsync(stoppingToken); 
+                summary = await companyImporter.RunAsync(stoppingToken); 
                 roleSummary = await roleImporter.RunAsync(stoppingToken); 
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
