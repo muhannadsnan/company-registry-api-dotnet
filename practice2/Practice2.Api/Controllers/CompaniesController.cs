@@ -4,11 +4,13 @@ using Practice2.Api.Import;
 using Practice2.Api.Contracts;
 using Practice2.Api.Data;
 using Practice2.Api.Domain;
+using Microsoft.AspNetCore.Authorization;
 
 namespace Practice2.Api.Controllers;
 
 [ApiController]
 [Route("api/companies")]
+[Authorize(Policy = "companies.read")]
 public class CompaniesController(AppDbContext db) : ControllerBase
 {
     [HttpGet]

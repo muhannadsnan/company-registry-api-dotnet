@@ -3,6 +3,9 @@ using Practice2.Api.Data;
 using Practice2.Api.Import;
 using Practice2.Api.Auth;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -29,13 +32,32 @@ builder.Services.AddOptions<JwtOptions>()
     .ValidateDataAnnotations()
     .ValidateOnStart();
 builder.Services.AddSingleton<TokenService>();    
-builder.Services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();    
+builder.Services.AddSingleton<IPasswordHasher<User>, PasswordHasher<User>>();  
+
+builder.Services.AddAuthentication().AddJwtBearer();
+builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+    .Configure<IOptions<JwtOptions>>((bearer, jwt) =>
+    {
+        bearer.MapInboundClaims = false;
+        bearer.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidIssuer = jwt.Value.Issuer,
+            ValidAudience = jwt.Value.Audience,
+            IssuerSigningKey = TokenService.CreateSigningKey(jwt.Value)
+        };
+    });
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("companies.read", policy => policy.RequireClaim("scope", "companies.read"))
+    .AddPolicy("companies.import", policy => policy.RequireClaim("scope", "companies.import"));
 
 
 // Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
+
+app.UseAuthentication(); // both must come before MapControllers anyway
+app.UseAuthorization();
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
@@ -44,8 +66,6 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
-
-app.UseAuthorization();
 
 app.MapControllers();
 

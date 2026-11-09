@@ -23,7 +23,8 @@ and the later rounds are in [What comes next](#what-comes-next). The concepts ar
 | 11a | `JwtOptions`: typed settings, the signing key in user-secrets, validated at startup | ✅ |
 | 11b | `TokenService`: claims, expiry, HMAC signature; what's inside a JWT | ✅ |
 | 11c | `POST /api/auth/login`: verify the hash, the same 401 for an unknown user and a wrong password | ✅ |
-| 11d | JWT validation, scope policies on the endpoints, 401/403 | ⏳ |
+| 11d | JWT validation, scope policies on the endpoints, 401/403 | ✅ |
+| 11e | A fallback policy: every endpoint needs a login unless it's marked open | ⏳ |
 | 12 | Correlation id middleware and structured logs | ⏳ |
 | 13 | Integration tests, also a login test and a roles test | ⏳ |
 
@@ -1986,6 +1987,105 @@ unknown user and a wrong password, so usernames can't be enumerated."
 
 ---
 
+## Step 11d: validate the JWT, and scope policies
+
+**Why:** 11c hands out tokens; now the API checks them on every request (authentication: who are you?)
+and checks the scopes per endpoint (authorisation: what may you do?).
+
+**`Program.cs`, authentication:**
+```csharp
+builder.Services.AddAuthentication().AddJwtBearer();
+builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+    .Configure<IOptions<JwtOptions>>((bearer, jwt) =>
+    {
+        bearer.MapInboundClaims = false;
+        bearer.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidIssuer = jwt.Value.Issuer,
+            ValidAudience = jwt.Value.Audience,
+            IssuerSigningKey = TokenService.CreateSigningKey(jwt.Value)
+        };
+    });
+```
+- `AddJwtBearer()` reads `Authorization: Bearer <token>` and checks the **signature, issuer, audience and
+  expiry**. All four are on by default; you only give the values to check against.
+- `Configure<IOptions<JwtOptions>>`: "when the bearer options are built, give me our validated
+  `JwtOptions`". It reads the config **late**, so step 13's tests can swap in their own key.
+- `MapInboundClaims = false`: keeps `sub`, `name`, `scope` as they are, instead of .NET's old long URIs.
+- Expiry has a 5-minute `ClockSkew` by default: a token works up to 5 minutes after `exp`.
+
+**`Program.cs`, authorisation:**
+```csharp
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy("companies.read", policy => policy.RequireClaim("scope", "companies.read"))
+    .AddPolicy("companies.import", policy => policy.RequireClaim("scope", "companies.import"));
+```
+A **policy** is a named rule. The token's `"scope":[...]` array is split back into one claim per scope.
+
+**The pipeline:**
+```csharp
+app.UseAuthentication();
+app.UseAuthorization();
+...
+app.MapControllers();
+```
+Authentication before authorisation, and both before the endpoints. Laravel: `auth` before `can:...`.
+
+**The controllers:** `[Authorize(Policy = "companies.read")]` on `CompaniesController` and
+`RolesController`, `[Authorize(Policy = "companies.import")]` on `ImportsController`. `AuthController`
+stays open: you can't need a token to get a token.
+
+**Login, case-insensitive:**
+```csharp
+var username = request.Username.Trim().ToLowerInvariant();
+var user = await db.Users.AsNoTracking()
+    .FirstOrDefaultAsync(u => u.Username == username, ct);
+```
+Usernames are stored lower-case; `"  TMP-Reader "` logs in as `tmp-reader`.
+
+### Checked
+On a spare port, with two temporary users (deleted afterwards):
+```
+no token  /api/companies 401 | /api/roles 401 | /api/imports 401
+reader    /api/companies 200 | /api/roles 200 | /api/imports 403 | POST /api/imports 403
+admin     /api/imports 200
+tampered token → 401  WWW-Authenticate: Bearer error="invalid_token"
+```
+I forgot `[Authorize]` on `RolesController` at first: `/api/roles` answered 200 without a token. An
+endpoint you forget is **open**. A fallback policy turns that around (11e).
+
+### 401 vs 403
+| Case | Status |
+|---|---|
+| No token, expired token, changed token | 401: not authenticated |
+| Valid token, missing scope (`reader` on imports) | 403: authenticated, not allowed |
+
+### Where the API gets the key to check
+It created the tokens itself, so it has the key: `IssuerSigningKey = TokenService.CreateSigningKey(...)`,
+the same `JwtOptions.SigningKey` 11b signs with. (`UserSecretsId` is only the folder where *development*
+keeps it; production would use an environment variable.)
+
+**Maskinporten is different:** **RS256**, asymmetric. Maskinporten signs with its **private** key; the API
+validates with the **public** key from Maskinporten's JWKS URL. The API can check tokens but never create
+one. With HMAC, whoever can check can also forge.
+
+### Stateless singletons, again
+Parameters and local variables exist **once per call**, on that call's own thread stack, so two logins at
+once can't see each other's. Fields live on the object, and a singleton has one object: shared. A
+stateless singleton = everything is a parameter or a local, plus read-only fields. JS: a function's
+`let`s are per call; a module-level `let` is shared.
+
+### Does order matter in `Program.cs`?
+- **`builder.Services.Add...`: almost never.** A list of recipes; nothing is built until `Build()` or the
+  first time it's asked for. The exception: the same interface registered twice, and the last one wins.
+- **`app.Use...`: always.** The middleware is a pipeline, and each request goes through it top to bottom.
+- Laravel: registering service providers vs the order of the middleware stack.
+
+**Interview line:** "JwtBearer validates signature, issuer, audience and expiry; scope policies on the
+controllers give 401 without a valid token and 403 without the scope."
+
+---
+
 ## Mistakes and what they taught
 
 | Step | Mistake | Lesson |
@@ -2011,6 +2111,8 @@ unknown user and a wrong password, so usernames can't be enumerated."
 | 11a | `"LifeTimeMinutes"` in appsettings.json for `LifetimeMinutes` | It still bound: config keys are case-insensitive. Match the spelling anyway, so a search finds both |
 | 11b | Thought the JWT payload is encrypted and only the key holder can read the scopes | It's base64url: anyone can read it. The key only stops changes and forgeries. No secrets in claims |
 | 11c | "POST protects the login data" | HTTPS encrypts GET and POST alike. POST keeps the password out of URLs, which end up in logs, history and `Referer` |
+| 11d | No `[Authorize]` on `RolesController` | A forgotten endpoint is open: `/api/roles` gave 200 without a token. A fallback policy closes forgotten endpoints |
+| 11d | "The API finds the key through `UserSecretsId`" | That's only where development stores it. The API signs and checks with the same `JwtOptions.SigningKey` |
 
 ---
 

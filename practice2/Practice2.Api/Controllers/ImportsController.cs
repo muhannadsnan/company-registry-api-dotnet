@@ -3,11 +3,13 @@ using Microsoft.EntityFrameworkCore;
 using Practice2.Api.Data;
 using Practice2.Api.Import;
 using Practice2.Api.Contracts;
+using Microsoft.AspNetCore.Authorization;
 
 namespace Practice2.Api.Controllers;
 
 [ApiController]
 [Route("api/imports")]
+[Authorize(Policy = "companies.import")]
 public class ImportsController(AppDbContext db, ImportQueue queue) : ControllerBase
 {
     [HttpPost]

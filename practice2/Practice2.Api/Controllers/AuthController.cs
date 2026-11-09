@@ -14,8 +14,9 @@ public class AuthController(AppDbContext db, IPasswordHasher<User> hasher, Token
     [HttpPost("login")]
     public async Task<ActionResult<LoginResponse>> Login(LoginRequest request, CancellationToken ct)
     {
+        var username = request.Username.Trim().ToLowerInvariant();
         var user = await db.Users.AsNoTracking()
-            .FirstOrDefaultAsync(u => u.Username == request.Username.Trim().ToLowerInvariant(), ct);
+            .FirstOrDefaultAsync(u => u.Username == username, ct);
 
         // The same answer for an unknown user and a wrong password, so callers can't find out which usernames exist.
         if (user is null || hasher.VerifyHashedPassword(user, user.PasswordHash, request.Password) == PasswordVerificationResult.Failed)

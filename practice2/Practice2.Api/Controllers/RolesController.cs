@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Practice2.Api.Contracts;
@@ -8,6 +9,7 @@ namespace Practice2.Api.Controllers;
 
 [ApiController]
 [Route("api/roles")]
+[Authorize(Policy ="companies.read")]
 public class RolesController(AppDbContext db) : ControllerBase
 {
     [HttpGet]
