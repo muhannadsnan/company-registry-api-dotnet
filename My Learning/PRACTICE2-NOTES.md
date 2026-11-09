@@ -24,7 +24,7 @@ and the later rounds are in [What comes next](#what-comes-next). The concepts ar
 | 11b | `TokenService`: claims, expiry, HMAC signature; what's inside a JWT | ✅ |
 | 11c | `POST /api/auth/login`: verify the hash, the same 401 for an unknown user and a wrong password | ✅ |
 | 11d | JWT validation, scope policies on the endpoints, 401/403 | ✅ |
-| 11e | A fallback policy: every endpoint needs a login unless it's marked open | ⏳ |
+| 11e | A fallback policy: every endpoint needs a login unless it's marked open; the company page is public | ✅ |
 | 12 | Correlation id middleware and structured logs | ⏳ |
 | 13 | Integration tests, also a login test and a roles test | ⏳ |
 
@@ -2083,6 +2083,78 @@ stateless singleton = everything is a parameter or a local, plus read-only field
 
 **Interview line:** "JwtBearer validates signature, issuer, audience and expiry; scope policies on the
 controllers give 401 without a valid token and 403 without the scope."
+
+---
+
+## Step 11e: a fallback policy, secure by default
+
+**Why:** in 11d an endpoint was **open unless I remembered** `[Authorize]`, and `/api/roles` was open
+for exactly that reason. A fallback policy flips it: **every endpoint needs a login unless it's marked
+open**. A forgotten endpoint is then closed, not open.
+
+**`Program.cs`:**
+```csharp
+builder.Services.AddAuthorizationBuilder()
+    .SetFallbackPolicy(new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build())
+    .AddPolicy("companies.read", policy => policy.RequireClaim("scope", "companies.read"))
+    .AddPolicy("companies.import", policy => policy.RequireClaim("scope", "companies.import"));
+...
+app.UseHttpsRedirection();
+app.UseAuthentication();
+app.UseAuthorization();
+
+if (app.Environment.IsDevelopment())
+    app.MapOpenApi().AllowAnonymous();
+
+app.MapControllers();
+```
+- `RequireAuthenticatedUser()`: any valid token, no scope.
+- The fallback is used **only** for endpoints with no `[Authorize]` and no `[AllowAnonymous]`. An endpoint
+  with its own policy uses that policy; the fallback doesn't add to it.
+- **It's only a safety net against anonymous callers, not against a missing scope.** A new controller
+  without `[Authorize(Policy = ...)]` is open to *every* logged-in user: a forgotten `UsersController`
+  would let `reader` create users. So each controller still names its scope; the fallback is behind it.
+
+**The open endpoints:**
+```csharp
+[AllowAnonymous]                 // AuthController: you can't need a token to get a token
+public class AuthController(...)
+
+[AllowAnonymous]                 // CompaniesController.GetByOrgnr: my choice, the company page is public
+[HttpGet("{orgnr}")]
+```
+- `[AllowAnonymous]` beats every `[Authorize]`, including the controller's. That's why it works on one
+  action, and why it's risky on a whole class.
+- My design: the **company details** are open to guests; the search and the roles need `companies.read`;
+  imports need `companies.import`. So a guest sees a company but gets 401 on its roles: the React company
+  page (React step 7) must show roles only when logged in.
+
+### Checked
+On a spare port, once with `[Authorize]` removed from `RolesController` (in a scratch copy) and once
+with my code; the same result both times, so the fallback alone protects roles:
+```
+no token: /api/roles 401 | /api/companies 401 | /api/companies/811577472 200 | .../roles 401
+          /api/imports 401 | login {} 400 (still open) | /openapi/v1.json 200
+reader:   /api/roles 200 | /api/imports 403
+```
+
+### The OpenAPI document
+`/openapi/v1.json` is a machine-readable description of the API: every endpoint, its parameters, request
+and response shapes, status codes and auth. It used to be called Swagger. `Microsoft.AspNetCore.OpenApi`
+generates it at runtime from the controllers and DTOs. What it's used for:
+- A docs UI (Swagger UI, Scalar) renders it as a clickable page, like the live demo's `/docs`.
+- Generating a typed client: `openapi-typescript` turns it into TypeScript types for the frontend.
+- Importing into Postman, Bruno, etc.
+
+PHP: what `swagger-php` / L5-Swagger build from annotations.
+
+**Why only in Development:** the template maps it only there, so in production `/openapi/v1.json` is a
+404. It's a choice, not a rule: it hides the API's map from strangers, and that matters less for a
+public API. Many public APIs publish theirs on purpose (Brreg does; the live demo serves `/docs`).
+`.AllowAnonymous()` is needed because the fallback would otherwise give the document a 401 too.
+
+**Interview line:** "A fallback policy requires an authenticated user everywhere, so a forgotten endpoint
+is closed; open endpoints are marked `[AllowAnonymous]`, and each controller still names its scope."
 
 ---
 

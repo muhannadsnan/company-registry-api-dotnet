@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.AspNetCore.Authorization;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -47,6 +48,7 @@ builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationSc
         };
     });
 builder.Services.AddAuthorizationBuilder()
+    .SetFallbackPolicy(new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build())
     .AddPolicy("companies.read", policy => policy.RequireClaim("scope", "companies.read"))
     .AddPolicy("companies.import", policy => policy.RequireClaim("scope", "companies.import"));
 
@@ -56,16 +58,14 @@ builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
+app.UseHttpsRedirection();
+
 app.UseAuthentication(); // both must come before MapControllers anyway
 app.UseAuthorization();
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-}
-
-app.UseHttpsRedirection();
+    app.MapOpenApi().AllowAnonymous();
 
 app.MapControllers();
 

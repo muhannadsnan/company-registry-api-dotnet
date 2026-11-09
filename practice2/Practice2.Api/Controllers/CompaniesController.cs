@@ -39,6 +39,7 @@ public class CompaniesController(AppDbContext db) : ControllerBase
         return new PageResult<CompanyDto>(items, query.Page, query.PageSize, total);
     }
 
+    [AllowAnonymous]
     [HttpGet("{orgnr}")]
     public async Task<ActionResult<CompanyDto>> GetByOrgnr(string orgnr, CancellationToken ct)
     {
