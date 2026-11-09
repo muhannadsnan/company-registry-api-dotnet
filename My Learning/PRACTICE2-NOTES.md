@@ -25,7 +25,8 @@ and the later rounds are in [What comes next](#what-comes-next). The concepts ar
 | 11c | `POST /api/auth/login`: verify the hash, the same 401 for an unknown user and a wrong password | ✅ |
 | 11d | JWT validation, scope policies on the endpoints, 401/403 | ✅ |
 | 11e | A fallback policy: every endpoint needs a login unless it's marked open; the company page is public | ✅ |
-| 12 | Correlation id middleware and structured logs | ⏳ |
+| 12a | Correlation id middleware: a validated id in a log scope and the response header, one structured line per request | ✅ |
+| 12b | The correlation id carried into the import worker through `import_runs` | ⏳ |
 | 13 | Integration tests, also a login test and a roles test | ⏳ |
 
 ---
@@ -2158,6 +2159,146 @@ is closed; open endpoints are marked `[AllowAnonymous]`, and each controller sti
 
 ---
 
+## Step 12a: correlation id middleware and structured logs
+
+**Why:** many requests run at once and their log lines mix. Every request gets an **id**, attached to
+**every log line** written during it (controller, EF's SQL, everything) and sent back in a response
+header. A user or a frontend can quote it, and one search finds that request's lines.
+
+**`Infrastructure/CorrelationIdMiddleware.cs`:**
+```csharp
+public class CorrelationIdMiddleware(RequestDelegate next, ILogger<CorrelationIdMiddleware> logger)
+{
+    public const string HeaderName = "X-Correlation-ID";
+
+    public async Task InvokeAsync(HttpContext context)
+    {
+        // Use the caller's id if it's safe to write into logs, otherwise make one.
+        var correlationId = context.Request.Headers[HeaderName].FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(correlationId)
+            || correlationId.Length > 64
+            || !correlationId.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.'))
+        {
+            correlationId = Guid.NewGuid().ToString("N");
+        }
+
+        context.TraceIdentifier = correlationId;
+        context.Response.Headers[HeaderName] = correlationId;
+
+        using var scope = logger.BeginScope("CorrelationId {CorrelationId}", correlationId);
+        var started = Stopwatch.GetTimestamp();
+        try
+        {
+            await next(context);
+        }
+        finally
+        {
+            logger.LogInformation(
+                "HTTP {Method} {Path} responded {StatusCode} in {ElapsedMs:0.0} ms",
+                context.Request.Method,
+                context.Request.Path.Value,
+                context.Response.StatusCode,
+                Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+        }
+    }
+}
+```
+**The middleware shape:** no base class; by convention a constructor with `RequestDelegate next` and an
+`InvokeAsync(HttpContext)`. `await next(context)` = run the rest of the pipeline and wait. Laravel:
+`handle($request, Closure $next)`; Express: `(req, res, next)`.
+- **On the way in** (before `next`): read and check the header, set `TraceIdentifier` and the response
+  header, start the scope and the timer. Runs before authentication and the controller.
+- **On the way out** (the `finally`, after `next`): the request line. Runs after the controller, so the
+  status code and the time are known. `finally` = logged even if something inside throws.
+- `Guid.NewGuid().ToString("N")` = `fc50a03e4f4944f29cc6e64f59dd8bb3` (`"D"`, the default, has dashes).
+- `BeginScope` = Laravel's `Log::withContext([...])`: every log line from any logger in this request
+  carries `CorrelationId` until the `using` ends.
+- `Stopwatch.GetTimestamp()` / `GetElapsedTime`: a precise timer, no allocation. PHP `hrtime(true)`, JS
+  `performance.now()`.
+
+**`Program.cs`, the first middleware**, so every response gets an id (the 401s and the HTTPS redirect
+too), the timing covers the whole pipeline, and its `finally` sees the final status code:
+```csharp
+app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseHttpsRedirection();
+app.UseAuthentication();
+app.UseAuthorization();
+```
+
+**`appsettings.Development.json`:** the console prints scopes only when asked:
+```json
+"Console": {
+    "FormatterName": "simple",
+    "FormatterOptions": { "IncludeScopes": true }
+}
+```
+
+### Why take the caller's id, and why check it
+- **Why take it:** when systems call each other (React → this API, or another agency's system → this
+  API), the caller passes its id and both systems' logs share it: one search follows the case across
+  both. With no header, the API makes its own. Alone, this API rarely gets one; it's cheap readiness.
+- **Why check it:** it's user input written into logs and echoed back. Unchecked, a caller could send
+  10 MB, or a line break plus a fake log line (**log injection**: `abc\n[ERR] admin password changed`),
+  or HTML/control characters for the log viewer. So: at most 64 characters, letters, digits, `-_.`;
+  otherwise make our own.
+
+### Message templates: structured logging
+`"... {Path}", path`, never `$"... {path}"`:
+- Interpolation builds the text **before** the logger sees it: one string, the values lost inside it.
+- A template gives the logger the template and the values **separately**: each becomes a named property.
+```json
+{ "Message": "HTTP GET /api/roles responded 401 in 3.2 ms",
+  "Method": "GET", "Path": "/api/roles", "StatusCode": 401, "ElapsedMs": 3.2,
+  "{OriginalFormat}": "HTTP {Method} {Path} responded {StatusCode} in {ElapsedMs:0.0} ms" }
+```
+A log tool (Seq, Application Insights) can then query `StatusCode = 401` or average `ElapsedMs` per
+`Path`, and group by template. And when the level is off, the text is never built. The compiler warns
+about interpolation in log calls (CA2254).
+
+### Middleware lifetime, singletons, thread safety
+- A **convention middleware** (`UseMiddleware<T>`) is created **once** and used by every request, like a
+  singleton. Inline `app.Use(...)` lambdas too. Only an `IMiddleware` class comes from DI per request.
+- So its **constructor takes only singletons**: `next`, `ILogger<T>`, `IOptions<T>`. Never
+  `AppDbContext` (a captive dependency). A scoped service goes in **`InvokeAsync`'s parameters**:
+  `InvokeAsync(HttpContext context, AppDbContext db)`, fresh per request. (Or a scope from
+  `IServiceScopeFactory`, like `ImportWorker`.) Development checks this and throws at startup.
+- **"Singleton" makes nothing thread-safe**; it only means shared. Framework singletons are built safe
+  (`ILogger`, `IOptions`, `Channel`). Mine are safe if stateless, or if shared state uses a thread-safe
+  type (`Channel`, `ConcurrentDictionary`, `lock`). A plain `List<T>` field two requests add to can lose
+  items or throw.
+- **Per-request data goes in locals, not fields.** A field is a shared whiteboard; a local is your own
+  notepad. `correlationId` is a local: as a field, two requests would overwrite each other's id.
+
+**My sentences, corrected:**
+- *Stateless* = the object keeps no data from one call to the next. Locals change all the time; that's
+  fine, each call has its own.
+- **In a stateless object**, fields are set once in the constructor and never change after that.
+- A `static` member belongs to the class itself, not to an object, so it's shared by everything
+  (`RoleTypes.Types` is `static readonly`: shared, never changed, safe; `TokenService.CreateSigningKey` is
+  a static method, called without an object).
+
+### Checked
+```
+no header      → X-Correlation-ID: fc50a03e4f4944f29cc6e64f59dd8bb3  (new)
+my-test-123    → my-test-123                                        (kept)
+'bad id!'      → a new id (space and !)    65 characters → a new id
+/api/roles 401 → still has an id
+```
+In the console, both lines of the `my-test-123` request (EF's SQL and the request line) end their
+scope with `=> CorrelationId my-test-123`; ASP.NET adds its own scopes (`TraceId`, `RequestId`,
+`RequestPath`) before it.
+
+### A side effect of the fallback policy
+`GET /api/auth/login` (login is POST only): **401** anonymous, **405** logged in. A wrong method is
+answered by a built-in "405" endpoint, which has no `[AllowAnonymous]`, so the fallback asks for a login
+first. Same for unknown URLs: 401 anonymous, 404 logged in. Attributes only work for requests that reach
+their endpoint. 404 = no such URL; 405 = the URL exists, not with this method (`Allow: POST`).
+
+**Interview line:** "A first middleware gives every request a validated correlation id, puts it in a
+logging scope and the response header, and logs one structured line per request with status and time."
+
+---
+
 ## Mistakes and what they taught
 
 | Step | Mistake | Lesson |
@@ -2185,6 +2326,8 @@ is closed; open endpoints are marked `[AllowAnonymous]`, and each controller sti
 | 11c | "POST protects the login data" | HTTPS encrypts GET and POST alike. POST keeps the password out of URLs, which end up in logs, history and `Referer` |
 | 11d | No `[Authorize]` on `RolesController` | A forgotten endpoint is open: `/api/roles` gave 200 without a token. A fallback policy closes forgotten endpoints |
 | 11d | "The API finds the key through `UserSecretsId`" | That's only where development stores it. The API signs and checks with the same `JwtOptions.SigningKey` |
+| 12a | `namespace Practice2.Api.Inrastructure`, then fixed in the file but not in Program.cs's `using` | A namespace typo compiles but shows in every log category; renaming it breaks every `using` of it |
+| 12a | `LifetimeMinutes` back to `LifeTimeMinutes` in appsettings.json | Read `git diff` before committing: it shows changes you didn't mean to make |
 
 ---
 
