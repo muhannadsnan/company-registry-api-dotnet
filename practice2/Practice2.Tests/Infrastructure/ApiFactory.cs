@@ -1,9 +1,12 @@
+using System.Net.Http.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
+using Practice2.Api.Contracts;
 using Practice2.Api.Data;
 using Testcontainers.PostgreSql;
+using System.Net.Http.Headers;
 
 namespace Practice2.Tests.Infrastructure;
 
@@ -11,6 +14,7 @@ namespace Practice2.Tests.Infrastructure;
 public class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
 {
     public const string Password = "test-pass-123";
+    public const string CompanyOrgnr = "974760673";
 
     private readonly PostgreSqlContainer _db = new PostgreSqlBuilder("postgres:17-alpine").Build();
 
@@ -36,6 +40,16 @@ public class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
         db.Users.AddRange(
             new User { Username = "admin", PasswordHash = hash, Scopes = "companies.read companies.import" },
             new User { Username = "reader", PasswordHash = hash, Scopes = "companies.read" });
+        db.Companies.Add(new Company
+        {
+            Orgnr = CompanyOrgnr, Name = "Testselskap AS", OrgForm = "AS",
+            Roles =
+            [   // deliberately unsorted
+                new Role { Orgnr = CompanyOrgnr, RoleType = "MEDL", PersonName = "Kari Nordmann", BirthYear = 1980 },
+                new Role { Orgnr = CompanyOrgnr, RoleType = "REVI", UnitOrgnr = "912855414", UnitName = "Revisor AS" },
+                new Role { Orgnr = CompanyOrgnr, RoleType = "DAGL", PersonName = "Ola Nordmann", BirthYear = 1975 },
+            ]
+        });
         await db.SaveChangesAsync();
     }
 
@@ -43,6 +57,19 @@ public class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         await base.DisposeAsync();
         await _db.DisposeAsync();
+    }
+
+
+
+    // logs in and returns a client that sends the token with every request
+    public async Task<HttpClient> CreateClientAsAsync(string username)
+    {
+        var client = CreateClient();
+        var response = await client.PostAsJsonAsync("/api/auth/login", new { username, password = Password });
+        response.EnsureSuccessStatusCode();
+        var login = await response.Content.ReadFromJsonAsync<LoginResponse>();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login!.Token);
+        return client;
     }
 }
 

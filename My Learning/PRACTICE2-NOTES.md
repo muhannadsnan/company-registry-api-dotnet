@@ -28,7 +28,8 @@ and the later rounds are in [What comes next](#what-comes-next). The concepts ar
 | 12a | Correlation id middleware: a validated id in a log scope and the response header, one structured line per request | ✅ |
 | 12b | The correlation id carried into the import worker through `import_runs` | ✅ |
 | 13a | Integration tests: `WebApplicationFactory` + a Testcontainers Postgres; the login tests | ✅ |
-| 13b | Authorisation tests (401/403/200, the public company page) and a roles test | ⏳ |
+| 13b | Authorisation tests (401/403/200, the public company page) and a roles test | ✅ |
+| 13c | An import test with a fake Brreg | ⏳ |
 
 ---
 
@@ -2513,6 +2514,167 @@ throwaway Postgres from Testcontainers, migrated and seeded before the app start
 
 ---
 
+## Step 13b: authorisation tests and a roles test
+
+**Why:** the curl matrix from 11d/11e (401 / 403 / 200, the public company page, a tampered token) and
+the roles endpoints, as tests that run in seconds on every change, against data we seed ourselves.
+
+**`ApiFactory.cs`, seed data** (added in `InitializeAsync`, before `SaveChangesAsync`):
+```csharp
+public const string CompanyOrgnr = "974760673";
+...
+db.Companies.Add(new Company
+{
+    Orgnr = CompanyOrgnr, Name = "Testselskap AS", OrgForm = "AS",
+    Roles =
+    [   // deliberately unsorted
+        new Role { Orgnr = CompanyOrgnr, RoleType = "MEDL", PersonName = "Kari Nordmann", BirthYear = 1980 },
+        new Role { Orgnr = CompanyOrgnr, RoleType = "REVI", UnitOrgnr = "912855414", UnitName = "Revisor AS" },
+        new Role { Orgnr = CompanyOrgnr, RoleType = "DAGL", PersonName = "Ola Nordmann", BirthYear = 1975 },
+    ]
+});
+```
+**Unsorted on purpose:** seeded in the right order, the sort test would pass even if the API didn't sort,
+because Postgres often returns rows in insertion order. Unsorted input proves the sort did it.
+
+**`ApiFactory.cs`, a login helper:**
+```csharp
+public async Task<HttpClient> CreateClientAsAsync(string username)
+{
+    var client = CreateClient();
+    var response = await client.PostAsJsonAsync("/api/auth/login", new { username, password = Password });
+    response.EnsureSuccessStatusCode();
+    var login = await response.Content.ReadFromJsonAsync<LoginResponse>();
+    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", login!.Token);
+    return client;
+}
+```
+- `EnsureSuccessStatusCode()` throws if the login fails: a clear error, not a strange 401 later.
+- `DefaultRequestHeaders` = a default header on an axios instance; every request sends the token.
+
+**`AuthorizationTests.cs`:**
+```csharp
+[Theory]
+[InlineData("/api/companies")]
+[InlineData("/api/companies/974760673/roles")]
+[InlineData("/api/roles")]
+[InlineData("/api/imports")]
+public async Task Without_a_token_protected_endpoints_return_401(string url)
+{
+    var response = await api.CreateClient().GetAsync(url);
+
+    Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+}
+
+[Fact]
+public async Task Company_details_are_public()          // GET /api/companies/{orgnr} anonymous → 200
+
+[Fact]
+public async Task Reader_can_read_but_not_import()
+{
+    var reader = await api.CreateClientAsAsync("reader");
+
+    Assert.Equal(HttpStatusCode.OK, (await reader.GetAsync("/api/roles")).StatusCode);
+    Assert.Equal(HttpStatusCode.Forbidden, (await reader.GetAsync("/api/imports")).StatusCode);
+    Assert.Equal(HttpStatusCode.Forbidden, (await reader.PostAsync("/api/imports", null)).StatusCode);
+}
+
+[Fact]
+public async Task Admin_can_list_imports()             // GET /api/imports as admin → 200
+
+[Fact]
+public async Task A_tampered_token_returns_401()
+{
+    var client = await api.CreateClientAsAsync("reader");
+    var parts = client.DefaultRequestHeaders.Authorization!.Parameter!.Split('.');
+    parts[2] = (parts[2][0] == 'A' ? "B" : "A") + parts[2][1..];   // change the signature's first character
+    client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", string.Join('.', parts));
+    ...                                                // GET /api/roles → 401
+}
+```
+- `parts[2]` is the signature (`header.payload.signature`); `[1..]` is a range: from index 1 on, PHP
+  `substr($s, 1)`, JS `s.slice(1)`.
+- **Never `POST /api/imports` as admin in these tests:** the worker would call the **real Brreg** over
+  the internet (slow, fails when the network or Brreg is down) and write thousands of companies into the
+  **shared** database, breaking other tests' counts. A fake Brreg solves that (13c).
+- **`POST` as reader is safe:** the authorisation middleware runs **before** the controller and answers
+  403 itself. `Start()` never runs, nothing is queued.
+
+**`RolesTests.cs`:**
+```csharp
+[Fact]
+public async Task Company_roles_are_sorted_by_rank()
+{
+    var reader = await api.CreateClientAsAsync("reader");
+
+    var roles = await reader.GetFromJsonAsync<List<RoleDto>>($"/api/companies/{ApiFactory.CompanyOrgnr}/roles");
+
+    Assert.NotNull(roles);
+    Assert.Equal(["DAGL", "MEDL", "REVI"], roles.Select(r => r.RoleType).ToArray());
+    Assert.Equal("Daglig leder", roles[0].RoleName);
+}
+
+[Fact]
+public async Task Role_search_filters_by_role_type()
+{
+    var reader = await api.CreateClientAsAsync("reader");
+
+    var page = await reader.GetFromJsonAsync<PageResult<RoleSearchItemDto>>("/api/roles?roleType=dagl");
+
+    Assert.Equal(1, page!.TotalCount);
+    var role = Assert.Single(page.Items);
+    Assert.Equal("Ola Nordmann", role.PersonName);
+    Assert.Equal("Testselskap AS", role.CompanyName);
+}
+
+[Theory]
+[InlineData("123456789", HttpStatusCode.BadRequest)]   // wrong MOD11 check digit
+[InlineData("923609016", HttpStatusCode.NotFound)]     // valid, but not in the database
+public async Task Company_roles_for_a_bad_or_unknown_orgnr(string orgnr, HttpStatusCode expected)
+```
+- `GetFromJsonAsync<T>` = GET + JSON decode in one call; it **throws** on a non-2xx status, so the
+  400/404 test uses `GetAsync`.
+- `Assert.Single` checks there's exactly one item and returns it.
+- `?roleType=dagl` is lowercase on purpose: it tests the API's `ToUpperInvariant()` too.
+- **`Assert.NotNull(roles)`, not only `roles!`:** `!` silences one expression; the variable stays "maybe
+  null" for the next line (warning CS8602). `Assert.NotNull` tells the compiler it's not null from there on.
+
+### `[Theory]` vs `[Fact]`
+- **`[Fact]`**: one situation, one test, no parameters.
+- **`[Theory]`**: a loop the test runner does for you. One method, run once per `[InlineData]` row, and
+  **each row is its own test** with its own pass/fail. A `foreach` inside a `[Fact]` would be one test
+  that stops at the first failure, without telling you about the rest.
+- Use it when the steps and the kind of expectation are the same and only the input changes.
+  PHPUnit `@dataProvider`, Jest `test.each`.
+
+### How the pieces fit
+- **`ApiFactory`** = the test infrastructure: one throwaway Postgres (migrated, seeded with users, a
+  company and its roles) and one app in memory. It does **not** log anyone in.
+- **`[Collection("api")]`** puts a class in the group "api"; `ApiCollection : ICollectionFixture<ApiFactory>`
+  says every class in that group gets the **same** `ApiFactory`. Without it: "no matching fixture".
+  Classes in one collection run one after another, not in parallel: right for one shared database.
+- **`(ApiFactory api)` in the constructor**: xUnit's own injection (not ASP.NET's DI) hands each test
+  class the shared fixture.
+- **Each test logs in itself** with `CreateClientAsAsync`: its own client, its own token. Shared: the
+  database and the app. Not shared: the client.
+
+### Checked
+```
+dotnet test → 25 passed: 10 Orgnr, 3 login, 8 authorisation, 4 roles; ~6 s
+```
+
+### Testing in an interview, in five sentences
+- "Unit tests check one piece of logic, like the MOD11 check; integration tests run the whole app."
+- "I use `WebApplicationFactory` to run the real API in memory and send real HTTP requests."
+- "The database is a real Postgres from Testcontainers, because InMemory and SQLite behave differently."
+- "I test the security rules: 401 without a token, 403 without the scope, a tampered token rejected."
+- "Tests never call external services like Brreg; I replace them with a fake."
+
+**Interview line:** "Integration tests cover the authorisation matrix (401, 403, 200, a public endpoint,
+a tampered token) and the roles endpoints against seeded data."
+
+---
+
 ## Mistakes and what they taught
 
 | Step | Mistake | Lesson |
@@ -2546,6 +2708,8 @@ throwaway Postgres from Testcontainers, migrated and seeded before the app start
 | 13a | `ApiFactory.cs` in `Practice2.Api/Infrastructure/` | Test code goes in the test project; in the API it would ship with the app and need test packages there |
 | 13a | `dotnet add package` run from the API folder: the test packages landed in `Practice2.Api.csproj` | `dotnet add package` adds to the project in the current folder. The tests still passed (Tests inherits the API's packages), so check `git diff` on the `.csproj` |
 | 13a | "The worker is off in tests" | It starts with the app on the first `CreateClient()` and queries `import_runs` at once; that's why the migration runs first |
+| 13b | `roles!` then `roles[0]`: warning CS8602 | `!` silences one expression only; `Assert.NotNull(roles)` tells the compiler for the rest of the test |
+| 13b | `using Microsoft.AspNetCore.Identity.Data;` auto-added by the IDE | It has its own `LoginRequest`; check auto-imports, they can pull in a same-named type from another namespace |
 
 ---
 
