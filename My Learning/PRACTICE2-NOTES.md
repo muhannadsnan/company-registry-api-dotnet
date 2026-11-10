@@ -29,7 +29,7 @@ and the later rounds are in [What comes next](#what-comes-next). The concepts ar
 | 12b | The correlation id carried into the import worker through `import_runs` | ✅ |
 | 13a | Integration tests: `WebApplicationFactory` + a Testcontainers Postgres; the login tests | ✅ |
 | 13b | Authorisation tests (401/403/200, the public company page) and a roles test | ✅ |
-| 13c | An import test with a fake Brreg | ⏳ |
+| 13c | An import test with a fake Brreg (`HttpMessageHandler`), in its own database | ✅ |
 
 ---
 
@@ -2675,6 +2675,152 @@ a tampered token) and the roles endpoints against seeded data."
 
 ---
 
+## Step 13c: an import test with a fake Brreg
+
+**The idea in one sentence:** tests never call the real Brreg, so the piece of `HttpClient` that actually
+sends requests is replaced with a fake that answers from data the test sets; everything above it stays
+real (`BrregClient`, the importers, the worker, the database).
+Laravel `Http::fake([...])`, Guzzle `MockHandler`, a fake axios adapter. In .NET that piece is an
+**`HttpMessageHandler`**.
+
+**`Practice2.Tests/Infrastructure/FakeBrreg.cs`:**
+```csharp
+// What the fake Brreg knows. A test fills it before starting an import.
+public class FakeBrreg
+{
+    public List<BrregEnhet> Companies { get; } = [];
+    public Dictionary<string, List<BrregRole>> Roles { get; } = [];
+}
+
+// Replaces the real network: answers BrregClient's two URLs from FakeBrreg.
+public class FakeBrregHandler(FakeBrreg brreg) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+    {
+        var path = request.RequestUri!.AbsolutePath;   // e.g. /enhetsregisteret/api/enheter/923609016/roller
+
+        object body;
+        if (path.EndsWith("/roller"))
+        {
+            var orgnr = path.Split('/')[^2];            // the second-last part
+            body = new BrregRoles([new BrregRoleGroup(brreg.Roles.GetValueOrDefault(orgnr, []))]);
+        }
+        else
+        {
+            body = new BrregPage(new BrregEmbedded(brreg.Companies),
+                new BrregPageInfo(500, brreg.Companies.Count, 1, 0));   // one page only
+        }
+
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = JsonContent.Create(body) });
+    }
+}
+```
+- `[^2]`: an index from the end (`^1` = last). PHP `$parts[count($parts) - 2]`, JS `parts.at(-2)`.
+- **Two classes:** `FakeBrreg` holds the data, the handler answers from it. `HttpClientFactory` creates
+  and throws away handlers over time, so the data must live outside them.
+
+**`ApiFactory.cs`:** every test app uses the fake, and a second collection:
+```csharp
+public FakeBrreg Brreg { get; } = new();
+...
+// in ConfigureWebHost:
+builder.ConfigureTestServices(services => services
+    .AddHttpClient<BrregClient>()
+    .ConfigurePrimaryHttpMessageHandler(() => new FakeBrregHandler(Brreg)));
+...
+[CollectionDefinition("import")]
+public class ImportCollection : ICollectionFixture<ApiFactory>;   // a second ApiFactory, its own database
+```
+- `ConfigureTestServices` runs **after** `Program.cs`'s registrations, so it overrides them.
+- **Primary handler** = the innermost one, the one that sends. The resilience handler still wraps it.
+- **Bonus:** now no test can reach the real Brreg, not even by mistake.
+
+**`Practice2.Tests/ImportTests.cs`:**
+```csharp
+[Collection("import")]
+public class ImportTests(ApiFactory api)
+{
+    [Fact]
+    public async Task Import_saves_companies_and_roles_from_brreg()
+    {
+        // Arrange: what Brreg "has"
+        api.Brreg.Companies.Add(new BrregEnhet("923609016", "Fjordselskap AS", new BrregOrgForm("AS"), new DateOnly(2020, 1, 15)));
+        api.Brreg.Companies.Add(new BrregEnhet("123456789", "Ugyldig AS", new BrregOrgForm("AS"), null)); // bad MOD11
+        api.Brreg.Roles["923609016"] =
+        [
+            new BrregRole(new BrregRoleType("DAGL"),
+                new BrregPerson(new BrregPersonName("Ola", null, "Nordmann"), new DateOnly(1975, 5, 1)),
+                null, null, false)
+        ];
+        var admin = await api.CreateClientAsAsync("admin");
+
+        // Act: start the import
+        var start = await admin.PostAsync("/api/imports", null);
+        Assert.Equal(HttpStatusCode.Accepted, start.StatusCode);
+        var run = await start.Content.ReadFromJsonAsync<ImportRunDto>();
+
+        // The worker runs in the background: ask until the run is finished (max ~5 s).
+        ImportRunDto? done = null;
+        for (var i = 0; i < 50; i++)
+        {
+            done = await admin.GetFromJsonAsync<ImportRunDto>($"/api/imports/{run!.Id}");
+            if (done!.Status is "Succeeded" or "Failed")
+                break;
+            await Task.Delay(100);
+        }
+
+        // Assert: the run's numbers, then the saved roles
+        Assert.Equal("Succeeded", done!.Status);
+        Assert.Equal(2, done.Read);
+        Assert.Equal(1, done.Inserted);
+        Assert.Equal(1, done.Rejected);
+        Assert.Equal(1, done.RolesSaved);
+
+        var roles = await admin.GetFromJsonAsync<List<RoleDto>>("/api/companies/923609016/roles");
+        var role = Assert.Single(roles!);
+        Assert.Equal("Ola Nordmann", role.PersonName);
+        Assert.Equal(1975, role.BirthYear);
+    }
+}
+```
+- **Arrange, Act, Assert:** set up, do the one thing, check.
+- `is "Succeeded" or "Failed"`: a pattern, short for `== "Succeeded" || == "Failed"`.
+- `RolesSaved = 1`: the role import goes through **every** company in this database, including the
+  seeded `974760673`; the fake has no roles for it, so its 3 seeded roles are replaced with none.
+
+### Why it's built this way
+- **A fake Brreg, a real Postgres:** a test must be **fast, repeatable and offline**. The real Brreg takes
+  over a minute, needs the network, can be down or rate-limit, and **its data changes every day**, so no
+  test could assert `Inserted = 1`. Postgres is part of our system and runs the same in a container.
+- **Its own collection, its own database:** not about speed (the fake answers instantly) but about
+  **what it changes**. In the shared "api" database it would wipe the seeded company's roles, and
+  `Company_roles_are_sorted_by_rank` would fail **only if the import ran first**: a **flaky** test.
+  **Rule:** tests that only read can share a database; a test that changes shared data gets its own.
+  (The roles tests only read, so they share.)
+- **Polling `GET /api/imports/{id}`:** the 202 is sent before the worker has even started; checking
+  right away would show `Queued`. `Location` is the URL to poll. The loop has a limit, so a stuck run
+  **fails** the test instead of hanging it.
+- **What it doesn't prove:** it proves the logic for the data it gets (validation, insert, counts, the
+  role mapping, the worker flow `Queued` → `Succeeded`). It does **not** prove our records match **Brreg's
+  real JSON**: the fake builds its answers from our own records, so if Brreg renamed `rollegrupper`, the
+  test would still pass and production would break. That's a **contract** question, covered by the real
+  import run, or by a fake that replays a saved real Brreg response.
+
+### Checked
+```
+dotnet test → 26 passed (two collections, two containers, run in parallel), ~8 s, 0 warnings
+```
+In a scratch copy, the role name joined without a space (`string.Join("", ...)`):
+```
+ImportTests.Import_saves_companies_and_roles_from_brreg [FAIL]
+Expected: "Ola Nordmann"   Actual: "OlaNordmann"           (the other 25 still passed)
+```
+
+**Interview line:** "External services are faked at the `HttpMessageHandler` level, so the real client,
+importer and worker run against fixed data; a test that writes gets its own database."
+
+---
+
 ## Mistakes and what they taught
 
 | Step | Mistake | Lesson |
@@ -2710,6 +2856,8 @@ a tampered token) and the roles endpoints against seeded data."
 | 13a | "The worker is off in tests" | It starts with the app on the first `CreateClient()` and queries `import_runs` at once; that's why the migration runs first |
 | 13b | `roles!` then `roles[0]`: warning CS8602 | `!` silences one expression only; `Assert.NotNull(roles)` tells the compiler for the rest of the test |
 | 13b | `using Microsoft.AspNetCore.Identity.Data;` auto-added by the IDE | It has its own `LoginRequest`; check auto-imports, they can pull in a same-named type from another namespace |
+| 13c | "The import test gets its own database so the job is shorter" | It's about what it changes: the role import rewrites every company's roles. A test that writes shared data gets its own database |
+| 13c | `BrregFake.cs` holding `FakeBrreg` | Convention: the file is named after its main class (`FakeBrreg.cs`) |
 
 ---
 

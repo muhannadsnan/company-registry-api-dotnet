@@ -7,6 +7,9 @@ using Practice2.Api.Contracts;
 using Practice2.Api.Data;
 using Testcontainers.PostgreSql;
 using System.Net.Http.Headers;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
+using Practice2.Api.Import;
 
 namespace Practice2.Tests.Infrastructure;
 
@@ -15,6 +18,7 @@ public class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
 {
     public const string Password = "test-pass-123";
     public const string CompanyOrgnr = "974760673";
+    public FakeBrreg Brreg { get; } = new();
 
     private readonly PostgreSqlContainer _db = new PostgreSqlBuilder("postgres:17-alpine").Build();
 
@@ -23,6 +27,9 @@ public class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
         builder.UseEnvironment("Testing");
         builder.UseSetting("ConnectionStrings:Practice2", _db.GetConnectionString());
         builder.UseSetting("Jwt:SigningKey", "test-signing-key-that-is-long-enough-0123456789");
+        builder.ConfigureTestServices(services => services
+            .AddHttpClient<BrregClient>()
+            .ConfigurePrimaryHttpMessageHandler(() => new FakeBrregHandler(Brreg)));
     }
 
     public async Task InitializeAsync()
@@ -76,3 +83,7 @@ public class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
 // Every class marked [Collection("api")] shares one ApiFactory, so one container.
 [CollectionDefinition("api")]
 public class ApiCollection : ICollectionFixture<ApiFactory>;
+
+[CollectionDefinition("import")]
+public class ImportCollection : ICollectionFixture<ApiFactory>;
+
