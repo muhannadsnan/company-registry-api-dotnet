@@ -27,7 +27,8 @@ and the later rounds are in [What comes next](#what-comes-next). The concepts ar
 | 11e | A fallback policy: every endpoint needs a login unless it's marked open; the company page is public | ✅ |
 | 12a | Correlation id middleware: a validated id in a log scope and the response header, one structured line per request | ✅ |
 | 12b | The correlation id carried into the import worker through `import_runs` | ✅ |
-| 13 | Integration tests, also a login test and a roles test | ⏳ |
+| 13a | Integration tests: `WebApplicationFactory` + a Testcontainers Postgres; the login tests | ✅ |
+| 13b | Authorisation tests (401/403/200, the public company page) and a roles test | ⏳ |
 
 ---
 
@@ -2371,6 +2372,147 @@ log scope with it and every line of the import can be traced to the request that
 
 ---
 
+## Step 13a: integration tests, the setup and the login tests
+
+**Why:** `OrgnrTests` test one method. An integration test runs the **whole app**: the real
+`Program.cs` (DI, middleware, auth, EF, controllers) against a real Postgres, through real HTTP
+requests, but in memory with no network port. Laravel's feature tests:
+`$this->postJson('/api/auth/login', [...])->assertOk()` with a fresh database.
+
+- **`WebApplicationFactory<Program>`** (`Microsoft.AspNetCore.Mvc.Testing`) starts the app in memory;
+  `CreateClient()` gives an `HttpClient` connected to it. In .NET 10 the top-level `Program` is public
+  automatically, so no `public partial class Program;` is needed.
+- **Testcontainers** (`Testcontainers.PostgreSql`) starts a throwaway `postgres:17-alpine` container
+  from code and removes it afterwards.
+
+**Packages, in the test project only:**
+```bash
+cd practice2/Practice2.Tests
+dotnet add package Microsoft.AspNetCore.Mvc.Testing --version 10.0.13
+dotnet add package Testcontainers.PostgreSql --version 4.16.0
+```
+
+**`Practice2.Tests/Infrastructure/ApiFactory.cs`:**
+```csharp
+public class ApiFactory : WebApplicationFactory<Program>, IAsyncLifetime
+{
+    public const string Password = "test-pass-123";
+
+    private readonly PostgreSqlContainer _db = new PostgreSqlBuilder("postgres:17-alpine").Build();
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.UseEnvironment("Testing");
+        builder.UseSetting("ConnectionStrings:Practice2", _db.GetConnectionString());
+        builder.UseSetting("Jwt:SigningKey", "test-signing-key-that-is-long-enough-0123456789");
+    }
+
+    public async Task InitializeAsync()
+    {
+        await _db.StartAsync();
+
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseNpgsql(_db.GetConnectionString())
+            .UseSnakeCaseNamingConvention()
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.MigrateAsync();
+
+        var hash = new PasswordHasher<User>().HashPassword(null!, Password); // the user argument isn't used
+        db.Users.AddRange(
+            new User { Username = "admin", PasswordHash = hash, Scopes = "companies.read companies.import" },
+            new User { Username = "reader", PasswordHash = hash, Scopes = "companies.read" });
+        await db.SaveChangesAsync();
+    }
+
+    async Task IAsyncLifetime.DisposeAsync()
+    {
+        await base.DisposeAsync();
+        await _db.DisposeAsync();
+    }
+}
+
+[CollectionDefinition("api")]
+public class ApiCollection : ICollectionFixture<ApiFactory>;
+```
+- **`IAsyncLifetime`:** xUnit calls `InitializeAsync` before the first test and `DisposeAsync` after the
+  last. It's PHPUnit's `setUpBeforeClass` / `tearDownAfterClass`, async.
+- **The explicit `IAsyncLifetime.DisposeAsync()`:** `WebApplicationFactory` already has a `DisposeAsync`
+  returning `ValueTask`; xUnit's returns `Task`. The interface prefix keeps the two apart.
+- **`new AppDbContext(options)`:** built by hand, because the app (and its DI) isn't running yet.
+- **`UseSetting`** puts values into the app's configuration before `Program.cs` reads them.
+
+**`Practice2.Tests/AuthTests.cs`:**
+```csharp
+[Collection("api")]
+public class AuthTests(ApiFactory api)
+{
+    [Fact]
+    public async Task Login_with_right_password_returns_a_token()
+    {
+        var client = api.CreateClient();
+
+        var response = await client.PostAsJsonAsync("/api/auth/login",
+            new { username = "reader", password = ApiFactory.Password });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<LoginResponse>();
+        Assert.False(string.IsNullOrEmpty(body!.Token));
+        Assert.Equal(["companies.read"], body.Scopes);
+    }
+
+    [Theory]
+    [InlineData("reader", "wrong-password")]
+    [InlineData("nobody", ApiFactory.Password)]
+    public async Task Login_with_wrong_password_or_unknown_user_returns_401(string username, string password)
+    {
+        var client = api.CreateClient();
+
+        var response = await client.PostAsJsonAsync("/api/auth/login", new { username, password });
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+}
+```
+- **`ApiFactory api` in the constructor:** xUnit injects the shared fixture, like DI.
+- **`LoginResponse`:** the API's own record, so the test breaks if its shape changes.
+- **`new { username, password }`:** shorthand for `new { username = username, password = password }`,
+  like JS `{ username, password }`.
+
+### Why it's built this way
+- **A real Postgres, not EF InMemory or SQLite:** InMemory runs no SQL, can't run migrations or
+  `ExecuteUpdateAsync` (the worker uses it); neither enforces Postgres's rules (the unique `Username`
+  index, `varchar(64)`). A test could pass there and fail in production. (These are still xUnit tests;
+  xUnit is only the runner. The difference from `OrgnrTests` is the scope.)
+- **Migrate before the app starts:** the first `CreateClient()` starts the app, and **`ImportWorker`
+  starts with it**; it is not off in tests. Its first line sends `UPDATE import_runs ...`. Without the
+  tables it throws, and a crashed `BackgroundService` stops the whole app. The order is about the
+  **tables**; the users are just test data the login tests need, seeded in the same place because the
+  context is already open (seeding later through `api.Services.CreateScope()` would work too).
+- **Its own `Jwt:SigningKey`:** the environment is `Testing`, and **user-secrets load only in
+  `Development`**. With no key, `ValidateOnStart` throws and the app doesn't start (the 11a crash). CI
+  has no user-secrets either, and tests should never depend on a real key.
+- **One shared factory (a collection fixture):** a Postgres container plus the app take a few seconds;
+  one per test would make 20 tests take a minute. xUnit creates a **new test class object per test**,
+  but the fixture is created once and handed to all of them. The price: one shared database, so **no
+  test may depend on another test's data**. The login tests only read.
+
+### Checked
+```
+dotnet test → 13 passed (10 Orgnr + 3 auth), ~5 s; the test container is removed afterwards
+```
+**A test must be able to fail.** In a scratch copy, the password check flipped to `== Success`:
+```
+Login_with_right_password_returns_a_token                      [FAIL]  (got 401)
+Login_with_wrong_password_..._401(reader, wrong-password)       [FAIL]  (got 200)
+Login_with_wrong_password_..._401(nobody, ...)                  passed  (user is null → 401 first)
+```
+
+**Interview line:** "Integration tests run the real app in memory with `WebApplicationFactory` against a
+throwaway Postgres from Testcontainers, migrated and seeded before the app starts."
+
+---
+
 ## Mistakes and what they taught
 
 | Step | Mistake | Lesson |
@@ -2401,6 +2543,9 @@ log scope with it and every line of the import can be traced to the request that
 | 12a | `namespace Practice2.Api.Inrastructure`, then fixed in the file but not in Program.cs's `using` | A namespace typo compiles but shows in every log category; renaming it breaks every `using` of it |
 | 12a | `LifetimeMinutes` back to `LifeTimeMinutes` in appsettings.json | Read `git diff` before committing: it shows changes you didn't mean to make |
 | 12b | "The row is better because it's the last thing before the logger writes" | The row wins because it's stored (survives a restart), visible (`GET /api/imports/{id}`) and already loaded by the worker |
+| 13a | `ApiFactory.cs` in `Practice2.Api/Infrastructure/` | Test code goes in the test project; in the API it would ship with the app and need test packages there |
+| 13a | `dotnet add package` run from the API folder: the test packages landed in `Practice2.Api.csproj` | `dotnet add package` adds to the project in the current folder. The tests still passed (Tests inherits the API's packages), so check `git diff` on the `.csproj` |
+| 13a | "The worker is off in tests" | It starts with the app on the first `CreateClient()` and queries `import_runs` at once; that's why the migration runs first |
 
 ---
 
