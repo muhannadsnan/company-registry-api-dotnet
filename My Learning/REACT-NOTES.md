@@ -7,49 +7,95 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 - **Part 2 (29 Oct – 1 Nov 2026):** `practice/web/`, a second frontend for my practice API, built in 11
   steps: paging, URL state, a layout, an import page that polls, and a login with route guards.
   Stack: Vite 8 · React 19.3 · TypeScript 7 · react-router · Oxlint · Prettier.
+- **Part 3 (from 14 Nov 2026):** `practice2/web/`, the frontend for the practice2 API (port 5020), in 12
+  steps. Stack: Vite 8 · React 19.3 · TypeScript 6 · ESLint · Prettier. Its steps are **merged into the
+  matching sections below**: one direct answer per topic, not a second version.
+
+| Part 3 step | What | Status |
+|---|---|---|
+| 1 | Create the app (Vite, React, TypeScript), Prettier, a proxy to the API | ✅ |
+| 2 | Login page: form, `POST /api/auth/login`, save the session in `localStorage` | ⏳ |
+| 3 | `apiFetch` sends the token, and a typed API client | ⏳ |
+| 4 | Search form with loading and error states | ⏳ |
+| 5 | Paging, with a component and props | ⏳ |
+| 6 | Router and the company page (400/404) | ⏳ |
+| 7 | Roles on the company page | ⏳ |
+| 8 | Search kept in the URL | ⏳ |
+| 9 | Layout route (header, footer, `<Outlet />`) | ⏳ |
+| 10 | Auth context, route guard, username and Log out in the header | ⏳ |
+| 11 | Token expiry: automatic logout, and a 401 sends you to the login page | ⏳ |
+| 12 | Import page with polling (link only for users with `companies.import`) | ⏳ |
 
 # Part 1: `web/`
 
 ---
 
-## 1. Setup commands
+## 1. Setup: create the app, format, proxy, checks
 
 ```bash
-# Node 24 (current LTS). Project A keeps Node 20 through its own systemd PATH.
-nvm install 24
-nvm alias default 24      # new terminals start on 24
-nvm use 24                # switch an already-open terminal
+# Node 24 (current LTS). Project A keeps Node 20 through its own systemd PATH: never uninstall v20.19.6.
+nvm install 24 && nvm alias default 24     # new terminals start on 24 (nvm use 24 for an open one)
 
-# Create the project (from the repo root)
-npm create vite@latest web -- --template react-ts
-#   "--" passes the flags through npm to create-vite
-#   Linter question: ESLint (the standard; Oxlint is newer and faster, smaller ecosystem)
-
+npm create vite@latest web -- --template react-ts   # "--": the rest goes to create-vite, not npm
 cd web
-npm install               # install dependencies (like composer install)
-npm install react-router  # routing
-npm run dev               # dev server on http://localhost:5173
+npm install                  # download what package.json lists into node_modules (= composer install)
+npm install -D prettier      # the formatter, pinned per project (a devDependency)
+cp ../../practice/web/.prettierrc.json .   # 4 spaces, no semicolons, single quotes, width 120
 ```
+
+**`package.json`: commands go only under `"scripts"`** (npm ignores other top-level keys for `npm run`):
+```json
+"scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "format": "prettier --write src vite.config.ts",
+    "preview": "vite preview"
+}
+```
+
+**`vite.config.ts`: the proxy** (Vite's settings live here, never in `package.json`):
+```ts
+export default defineConfig({
+    plugins: [react()],
+    server: {
+        proxy: {
+            '/api': 'http://localhost:5020', // practice2 API (practice: 5010, web/: 5080)
+        },
+    },
+})
+```
+Test: `http://localhost:5173/api/companies/926056522` gives the company JSON (public);
+`/api/companies` gives **401** (it reached .NET, no token). Both prove the proxy works.
 
 **Day-to-day: two terminals**
-
 ```bash
-# Terminal 1: the .NET API, rebuilds on C# changes
-cd ~/Documents/dotnet-demo/src/CompanyRegistry.Api
-dotnet watch
-
-# Terminal 2: the React dev server
-cd ~/Documents/dotnet-demo/web
-npm run dev
+cd practice2/Practice2.Api && dotnet watch   # the API, rebuilds on C# changes
+cd practice2/web && npm run dev              # Vite on http://localhost:5173
 ```
 
-**Checks**
-
+**Before a commit**
 ```bash
-npx tsc -b        # type-check (Vite does NOT type-check while developing)
-npx eslint src    # lint
-npm run build     # type-check + production build
+npx tsc -b        # type-check: Vite does NOT type-check in dev, it only strips the types
+npm run lint      # ESLint: finds bugs
+npm run format    # Prettier: fixes layout only (also runs on save, see .vscode/settings.json)
+npm run build     # tsc -b + a production bundle in dist/ (what CI runs)
 ```
+
+### Questions and answers
+- **Why a proxy, not `fetch("http://localhost:5020/...")`?** A different port is a different **origin**,
+  and the browser blocks the page from reading the response (CORS) unless the API sends CORS headers.
+  With the proxy the browser only talks to 5173, and **Vite's dev server** (a Node process) forwards
+  `/api` to 5020, server to server, where CORS doesn't apply. Like Nginx `proxy_pass` or Nuxt `devProxy`.
+- **Why no CORS setup in the API?** The browser sees one origin. In production a **reverse proxy**
+  (nginx, Caddy, the host) serves the built files and `/api` on the same domain, or the API serves the
+  files itself (the real project does this).
+- **Which endpoints work without a token?** Login and the company page: `[AllowAnonymous]` on them
+  overrides the fallback policy that requires a login everywhere else.
+- **Does `npm run dev` type-check?** No. `npx tsc -b` does (also inside `npm run build`); the editor shows
+  type errors live.
+- **ESLint or Oxlint?** ESLint is the most used in existing codebases; Oxlint is newer and faster.
+  `web/` and `practice2/web/` use ESLint, `practice/web/` Oxlint.
 
 ---
 
@@ -379,6 +425,8 @@ Rule: every value from the component that the effect *uses* goes in the list. ES
 | `localhost:5173/api/companies/912855414` gave 401 | That's the **API** URL (needs a token); the **page** URL is `/companies/912855414`. Only `fetch` in `api.ts` sends the token |
 | Search gave **500**, log said `column c.organisation_number does not exist` | The running API was old code; the database had been migrated (column renamed to `orgnr`). Old code + new schema breaks, which is why **expand/contract migrations** exist. Restarting the API fixed it |
 | `npm run dev` gave ENOENT `package.json` | Wrong folder; run it inside `web/` |
+| (Part 3) The proxy in `package.json` under `"server"`: the page showed the app, not JSON | Vite never reads `package.json` for settings (that was Create React App). Vite's settings go in `vite.config.ts` |
+| (Part 3) `"format": "prettier"`, then the full command added at the top level of `package.json` | `prettier` without files and `--write` does nothing; and `npm run` only reads `"scripts"` |
 
 ---
 
