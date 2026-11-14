@@ -15,7 +15,7 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 |---|---|---|
 | 1 | Create the app (Vite, React, TypeScript), Prettier, a proxy to the API | ✅ |
 | 2 | Login page: form, `POST /api/auth/login`, save the session in `localStorage` | ✅ |
-| 3 | `apiFetch` sends the token, and a typed API client | ⏳ |
+| 3 | `apiFetch` sends the token, and a typed API client | ✅ |
 | 4 | Search form with loading and error states | ⏳ |
 | 5 | Paging, with a component and props | ⏳ |
 | 6 | Router and the company page (400/404) | ⏳ |
@@ -168,78 +168,77 @@ createRoot(document.getElementById('root')!).render(
 - `!` after `getElementById('root')` tells TypeScript "this is not null".
 - `<StrictMode>` adds extra checks in development only.
 
-### src/api.ts: the typed API client
+### src/api.ts: the typed API client (best version: Part 3, step 3)
 
+The **only** file that calls the API: the types, the token, the errors.
 ```ts
-export type Address = {
-    street: string | null
-    postalCode: string | null
-    postalPlace: string | null
-    municipalityNumber: string | null
-    municipality: string | null
-}
+import { loadSession } from './auth/session'
 
-export type Company = {
-    organisationNumber: string
+// The C# records as the JSON arrives: camelCase, `T?` → `T | null`, DateOnly → "2020-01-15" (a string)
+export type CompanyDto = {
+    orgnr: string
     name: string
-    organisationFormCode: string
-    address: Address
+    orgForm: string
     registrationDate: string | null
-    lastChangedAt: string
 }
 
-export type PagedResult<T> = {
-    items: T[]
-    page: number
-    pageSize: number
-    totalCount: number
+export type PageResult<T> = { items: T[]; page: number; pageSize: number; totalCount: number }
+
+// fetch doesn't throw on 4xx/5xx; this does, and carries the status for the UI
+export class ApiError extends Error {
+    status: number
+    constructor(status: number, message: string) {
+        super(message)
+        this.status = status
+    }
 }
 
-let token: string | null = null
-
-async function getToken(): Promise<string> {
-    if(token) return token
-
-    const response = await fetch('/connect/token', {
-        method: 'POST',
-        body: new URLSearchParams({
-            grant_type: 'client_credentials',
-            client_id: 'demo-reader',
-            client_secret: 'reader-secret'
-        })
-    })
-
-    if(!response.ok) throw new Error(`Token request failed: ${response.status}`)
-
-    const data: {access_token: string} = await response.json()
-    token = data.access_token
-    return token
+async function apiFetch<T>(url: string): Promise<T> {
+    const session = loadSession()
+    const headers = new Headers()
+    if (session) headers.set('Authorization', `Bearer ${session.token}`)   // only when logged in
+    const response = await fetch(url, { headers })
+    if (!response.ok) throw new ApiError(response.status, `${response.status} ${response.statusText}`)
+    return response.json()           // no await needed: the caller awaits the same Promise
 }
 
-async function get<T>(path: string): Promise<T> {
-    const response = await fetch(path, {
-        headers: { Authorization: `Bearer ${await getToken()}`}
-    })
-    if(!response.ok) throw new Error(`${response.status} ${response.statusText}`)
-    return response.json()
-}
-
-export function searchCompanies(name: string, page = 1) {
-    const query = new URLSearchParams({ name, page: String(page), pageSize: '20'})
-    return get<PagedResult<Company>>(`/api/companies?${query}`)
+export function searchCompanies(name: string, page = 1, pageSize = 20) {
+    const params = new URLSearchParams({ name, page: String(page), pageSize: String(pageSize) })
+    return apiFetch<PageResult<CompanyDto>>(`/api/companies?${params}`)   // ? starts the query, not /
 }
 
 export function getCompany(orgnr: string) {
-    return get<Company>(`/api/companies/${orgnr}`)
+    return apiFetch<CompanyDto>(`/api/companies/${encodeURIComponent(orgnr)}`)
 }
 ```
 
-- **The types mirror the C# DTOs** (`CompanyDto`, `AddressDto`, `PagedResult<T>`): both sides of the API contract. `string | null` = C#'s `string?`.
-- **Generics:** `PagedResult<T>` has a fixed shape, but the item type is a placeholder filled in when used: `PagedResult<Company>` gives `items: Company[]`. A parameter, but for a type. `get<T>` works the same way: the caller says what the JSON will be.
-- **`URLSearchParams` as the body** sends form-encoded data, the same as `curl -d`.
-- **The token is cached** in `let token`, so it's fetched once. It expires after 1 hour; handling that is a later improvement.
-- **Only `searchCompanies` and `getCompany` are exported.** The pages never deal with tokens.
-- **Demo shortcut:** a real frontend never holds a client secret. Real users log in through **ID-porten** (BankID, MinID, … are methods *inside* ID-porten; OIDC authorization code + PKCE) and get their own token. Often a **BFF** (backend-for-frontend) keeps the token on the server and gives the browser only a secure cookie.
+**Questions and answers**
+- **Why one API file?** One place for the URLs, the token and error handling: reuse, and one place to
+  change. Like a shared axios instance or composable in Vue, or a service class around `Http::` in Laravel.
+- **The types mirror the C# DTOs:** both sides of the contract. `string?` → `string | null`;
+  `DateOnly?` → `string | null` (JSON has no date type). Only `int? BirthYear` is a number.
+- **Generics:** `PageResult<T>` has a fixed shape, the item type is filled in when used:
+  `PageResult<CompanyDto>` gives `items: CompanyDto[]`. `apiFetch<T>`: the caller says what the JSON is.
+- **Why the login keeps plain `fetch`:** in step 11, `apiFetch` treats **every 401 as "token expired"**
+  and goes to the login page; at login a 401 means "wrong password" and must show a message.
+- **Why `ApiError` with the status:** the **UI** decides by it: 404 → "Company not found", 400 → "Invalid
+  number", 401 → log in again. (Extension: carry `X-Correlation-ID` so the page can show an error ref.)
+- **`return response.json()` without `await`:** in an `async` function, returning a Promise is the same
+  for the caller as returning its value. `await` is needed only when **this** function uses the value
+  (step 2 saved the session), or inside `try/catch` to catch it there.
+- **`encodeURIComponent`:** escapes `/ ? # &` and spaces so user input stays one path segment
+  (`"12/34"` would be two). `URLSearchParams` does the same for query values.
+- **Part 1 (`web/`)** fetched a token with a client secret from the browser: a demo shortcut. Real users
+  log in (ID-porten: OIDC code + PKCE), often through a **BFF** that keeps the token on the server.
+
+**Using it in a component** (App.tsx, step 3's proof):
+```tsx
+const [total, setTotal] = useState<number | null>(null)
+useEffect(() => {
+    if (!session) return
+    searchCompanies('').then((result) => setTotal(result.totalCount))
+}, [session])                          // runs again when session changes; hooks before any early return
+```
 
 ### src/page/SearchPage.tsx: state, form, list
 
@@ -431,6 +430,8 @@ Rule: every value from the component that the effect *uses* goes in the list. ES
 | (Part 3) `FormEvent` struck through in the editor | Deprecated in `@types/react` 19.3: use `SubmitEvent<HTMLFormElement>`. Strike-through = deprecated |
 | (Part 3) `class="logout"` on a button | JSX uses `className` (`class` is a JS keyword); tsc rejects `class` |
 | (Part 3) `role="error"`, then `role="akert"` | `role` is a plain string, so tsc can't catch it; the ARIA role is `alert` |
+| (Part 3) `` `/api/companies/${params}` ``: the API log showed **400** | Again `/` instead of `?` (as in Part 1): the query became an orgnr and failed MOD11. TS checks types, not URLs |
+| (Part 3) `app.ts` for the API client | Name it `api.ts`: `app.ts` next to `App.tsx` invites import mix-ups (case-insensitive file systems) |
 
 ---
 

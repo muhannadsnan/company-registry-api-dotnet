@@ -1,9 +1,16 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import LoginPage from './auth/LoginPage'
 import { clearSession, loadSession } from './auth/session'
+import { searchCompanies } from './api'
 
 function App() {
     const [session, setSession] = useState(loadSession) // runs once, on the first render
+    const [total, setTotal] = useState<number | null>(null)
+
+    useEffect(() => {
+        if (!session) return
+        searchCompanies('').then((result) => setTotal(result.totalCount))
+    }, [session]) // runs again when session changes (login, logout)
 
     if (!session) return <LoginPage onLogin={setSession} />
 
@@ -22,6 +29,10 @@ function App() {
             >
                 Log out
             </button>
+
+            <hr />
+
+            <p>{total === null ? 'Loading...' : `${total} companies`}</p>
         </>
     )
 }
