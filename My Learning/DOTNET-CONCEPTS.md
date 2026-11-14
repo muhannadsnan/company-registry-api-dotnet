@@ -31,11 +31,20 @@ service into a singleton is a **captive dependency**: one DbContext would live f
 worker creates a fresh scope per import run.
 
 **In my words:**
-> The DI container builds it. I register services in Program.cs with a lifetime, and the container passes them into
-> constructors. Scoped means one per request, so each request gets a fresh DbContext. Singleton means one shared
-> instance, created the first time something asks for it, like the import queue that the controller writes to and the
-> worker reads from. A hosted service like the worker starts with the app and lives forever, so it creates its own
-> scope per run to get a fresh DbContext.
+> **Lifetimes.** Scoped means one instance per request, shared by everything during that request. Singleton means
+> one instance for the whole app, shared by everything and created the first time something asks for it. Transient
+> means a new instance every time something asks for it.
+>
+> **Why each one here.** AppDbContext is scoped because it isn't thread-safe: two requests sharing one at the same
+> moment could mix up their changes or throw. TokenService is a singleton because it's stateless, with no
+> per-request data in fields, so sharing it is safe, and one instance is cheaper.
+>
+> **Captive dependency.** A singleton takes only singletons in its constructor, never a scoped service: a captured
+> AppDbContext would live as long as the app, its change tracker would grow forever, and requests could mix data. In
+> Development the app throws at startup to prevent that.
+>
+> **In the worker.** ImportWorker takes IServiceScopeFactory, a singleton, and creates a new scope per run; the
+> DbContext comes from that scope, and `await using` disposes it at the end of each loop.
 
 ## 2. Middleware and the request pipeline
 
@@ -52,10 +61,20 @@ every later log line (including exceptions) carries the correlation id.
 before anyone has read the token, so every user looks anonymous. Every protected endpoint gives 401.
 
 **In my words:**
-> Middleware is a chain of layers every request goes through, in the order I add them. Each one can act before and
-> after the next, or stop the request and answer itself, like auth returning 401. So order matters: authentication
-> must come before authorization, or no user is known yet. The correlation id goes first, so every later log line and
-> every response carries it, even when a later layer stops the request early.
+> **The onion.** The pipeline is a chain of middleware layers, run in the order I add them, like an onion. Each
+> layer gets the request and a `next`: the code before `await next` runs on the way in, the code after it runs on
+> the way out, after the controller has answered, so the layers finish in reverse order.
+>
+> **Short-circuit.** A layer can also skip `next` and answer itself, like authorisation returning 401.
+>
+> **Why correlation goes first.** CorrelationIdMiddleware goes first so it covers every layer after it: its log
+> scope puts the request's id on every later log line, errors included; every response gets the X-Correlation-ID
+> header, even one a later layer stops early, like a 401; and its timer and `finally` see the whole pipeline, the
+> method and the final status code.
+>
+> **Order matters.** If UseAuthorization came before UseAuthentication, nobody would have read the token yet, so
+> every caller would look anonymous: protected endpoints answer 401 even with a valid token, and only
+> [AllowAnonymous] ones work.
 
 ## 3. async/await and Task
 
@@ -73,11 +92,23 @@ is passed down so a closed request or a stopping app cancels the database query 
 under load), and can deadlock in some contexts. "Async all the way down."
 
 **In my words:**
-> await frees the thread while we wait for I/O like the database or an HTTP call. The thread is a waiter and the
-> database is the kitchen: the waiter doesn't stand at the kitchen door, but goes back to the pool and serves other
-> requests, so the server handles many more requests at once. Blocking with .Result holds a thread doing nothing, and
-> under load you run out of threads. Task is like a JS Promise. The CancellationToken is the "stop" signal: if the
-> client disconnects or the app shuts down, the query or HTTP call is cancelled instead of finishing for nobody.
+> **What await does.** await frees the thread while we wait for I/O like the database or an HTTP call: it goes back
+> to the pool and serves other requests, and the method continues when the result arrives. That matters more in
+> ASP.NET than in PHP-FPM: PHP gives each request its own process, while ASP.NET serves many requests on a few
+> shared threads, so a thread sitting and waiting is wasted for everyone.
+>
+> **Blocking.** .Result and .Wait() block the thread until the task finishes; under load the pool runs out of
+> threads (thread pool starvation), and in UI apps or old ASP.NET they can deadlock (the task waits for the context
+> the blocked thread holds). The rule is async all the way down.
+>
+> **Concurrency.** Calling an async method starts the work at once and returns a Task, like a JS Promise:
+> RoleImporter starts five Brreg calls, then awaits Task.WhenAll, so they run at the same time (about 200 ms instead
+> of 5 × 200 ms); ChunkSize caps how many run at once.
+>
+> **Cancellation.** The CancellationToken is the stop signal for work in progress: when the user closes the browser,
+> the running query or HTTP call is cancelled instead of finishing for nobody, and when the app shuts down,
+> ImportWorker's stoppingToken stops the import at the next await. The final save uses CancellationToken.None, so
+> the run's status is still written and the row isn't left Running.
 
 ## 4. EF Core: DbContext, DbSet, migrations, change tracking, AsNoTracking
 
@@ -101,12 +132,25 @@ At that scale I'd do `INSERT … ON CONFLICT` via raw SQL or `COPY`, which is wh
 EF Core 7+ also has `ExecuteUpdate`/`ExecuteDelete` for set-based updates (used in `ImportWorker`).
 
 **In my words:**
-> Change tracking means EF keeps a snapshot of what it loaded, so at SaveChanges it updates only the columns that
-> changed, and writes nothing if nothing changed. The importer needs that for its upsert. Reads don't change anything,
-> so AsNoTracking skips the snapshot. A migration is one schema change, generated from my entities, and the history
-> table records which ones a database has run. An applied migration never runs again on that database, so editing it
-> means my existing databases and fresh ones quietly differ, and forcing it to rerun conflicts with the existing tables.
-> Changes always go in a new migration.
+> **Change tracking.** Change tracking means EF keeps a snapshot of the original values of every entity it loads. At
+> SaveChanges it compares each entity with its snapshot and sends an UPDATE with only the changed columns, nothing
+> at all for an unchanged one; added entities become INSERTs. CompanyImporter loads the page's existing companies,
+> assigns the Brreg values and asks `db.Entry(company).State`: Modified counts as updated, anything else as
+> unchanged.
+>
+> **AsNoTracking and Clear.** Reads change nothing, so AsNoTracking skips the snapshots: less memory, faster
+> queries. ChangeTracker.Clear() after each page forgets that page's entities, so the tracker doesn't grow to all
+> 7,000 companies and each SaveChanges compares only one page.
+>
+> **Migrations.** A migration is one schema change generated from my entities, and the history table records which
+> ones a database has run, so an applied migration never runs again there: editing it means my database and fresh
+> ones quietly differ. If it was only local, I roll back with `dotnet ef database update <PreviousMigration>`, then
+> `dotnet ef migrations remove`, fix the model and add it again; if it was pushed or ran anywhere else, I add a new
+> migration that corrects it.
+>
+> **Bulk changes.** For a million rows I wouldn't use tracked entities: I'd bulk-load with Postgres COPY into a
+> staging table and run one INSERT ... ON CONFLICT (orgnr) DO UPDATE. ExecuteUpdate/ExecuteDelete are for set-based
+> changes with one rule for every row, like marking unfinished import runs Abandoned on startup.
 
 ## 5. LINQ and IQueryable: when does the query hit the database?
 
@@ -124,10 +168,24 @@ send exactly two SQL statements.
 table and filtering in C#, a classic performance bug.
 
 **In my words:**
-> LINQ on an IQueryable only builds the query. Each Where and OrderBy adds to the SQL, and nothing runs until I call
-> ToListAsync or CountAsync, like ->get() in Laravel. I filter and sort first, then Skip and Take for the page, and
-> Select into the DTO last: the DTO is built by a constructor, and EF can't see inside it to map its properties back
-> to columns, so it can't translate steps that come after it.
+> **IQueryable.** An IQueryable is a query that hasn't run yet: Where, OrderBy, Skip/Take and Select on it only
+> build the SQL, like Laravel's query builder before ->get(). It runs when I materialise it with ToListAsync,
+> CountAsync, FirstOrDefaultAsync or a foreach.
+>
+> **Search.** Search sends exactly two statements, CountAsync for the total and ToListAsync for the page, both with
+> the same WHERE.
+>
+> **IEnumerable.** The result is a List, an IEnumerable in memory, and LINQ on it runs in C#, like a Laravel
+> Collection after ->get(): the same method names, a different place. So `db.Companies.ToList().Where(...)` loads
+> the whole table and filters in C#: filter first, materialise last.
+>
+> **Select last.** Select into the DTO comes last, because EF translates by mapping entity properties to columns,
+> and after a constructor call it can't see which argument is which column, so a later Where or OrderBy throws at
+> runtime.
+>
+> **What EF can't translate.** RoleTypes.RankOf is my own C# method with a Dictionary, which Postgres doesn't know,
+> so EF can't translate an OrderBy on it: GetRoles loads the company's roles and sorts them in memory, which is fine
+> for a handful of rows. For many rows I'd store the rank in a column and sort in SQL.
 
 ## 6. Minimal APIs vs controllers
 
@@ -141,10 +199,23 @@ and Microsoft's newer default; this repo uses them for `/health` and `/docs`.
 **Analogy:** Controllers = CodeIgniter controllers. Minimal APIs = Nuxt `server/api/*.ts` handlers.
 
 **In my words:**
-> Same engine, two styles. A minimal API maps each endpoint with a lambda, like Express. Controllers are classes that
-> inherit ControllerBase and group related endpoints, and the [ApiController] attribute gives automatic model
-> validation and 400 responses. Both share the same DI, middleware and auth. New templates default to minimal APIs.
-> I chose controllers because they keep a growing API organised and most existing .NET codebases use them.
+> **Two styles.** Same engine, two ways to organise code; neither has features the other lacks. Both get the same
+> DI, middleware pipeline, routing, model binding, auth ([Authorize] / RequireAuthorization) and ProblemDetails. A
+> minimal API registers each route in Program.cs with a lambda, `app.MapGet("/x", (AppDbContext db) => ...)`, like a
+> Laravel route closure or Express; dependencies come in as lambda parameters. A controller is a class inheriting
+> ControllerBase: routes come from attributes ([Route] on the class, [HttpGet]/[HttpPost] on the methods) and
+> dependencies through the constructor, like a Laravel controller.
+>
+> **Why controllers.** I chose controllers because most existing enterprise .NET code uses them, so it's what I'll
+> maintain at work, and a class groups related endpoints under one route prefix and one [Authorize] (with minimal
+> APIs I'd use MapGroup).
+>
+> **What [ApiController] gives.** [ApiController] gives: automatic 400 validation, so a login without Username
+> ([Required] on LoginRequest) gets a 400 ValidationProblemDetails response before Login runs, no exception and no
+> ModelState check, like a Laravel FormRequest; binding inference, so LoginRequest comes from the JSON body without
+> [FromBody]; ProblemDetails bodies for bare error results like NotFound(); and it requires attribute routing.
+> [Authorize] and the 401 on a wrong password are not from it: [Authorize] works anywhere, and the 401 is my own
+> Problem(statusCode: 401) call.
 
 ## 7. Records, nullable reference types, `required`
 
@@ -165,13 +236,29 @@ and Microsoft's newer default; this repo uses them for `/health` and `/docs`.
 untrusted), `Data/Company.cs`.
 
 **In my words:**
-> A record is a data type with value equality: two records with the same values are equal (like PHP ==), while two
-> class instances are equal only if they are the same object. It's filled once through its constructor and is
-> read-only after that; `with` makes a changed copy. That fits a DTO: a contract I build and send, never change. The
-> entity is a class because EF tracks changes by modifying it, and its identity is its key, not its values.
-> `?` and `required` are compile-time checks: `?` marks what may be null so the compiler warns where a null could slip
-> through, and `required` makes it a build error to create the object without that field. EF also uses them for
-> NULL / NOT NULL columns. Checking the caller's input at runtime is a different tool: validation attributes like [Range].
+> **Records.** A record is a class (a reference type) with extras the compiler writes: value equality (two records
+> are == when all their values match), immutability by default (init-only, set once then read-only), `with` for a
+> copy with changes (`req with { Username = "x" }`, like JS `{...req, username: "x"}`), a one-line declaration and a
+> readable ToString.
+>
+> **DTOs vs entities.** Records fit DTOs (LoginRequest, BrregEnhet, CompanyDto): data created once and passed along.
+> Entities like Company are classes because EF needs identity, a row is the same row because of its key (HasKey
+> Orgnr), not because all values match, and mutability: I change company.Name, the change tracker compares it to the
+> snapshot and writes an UPDATE. EF can map a record, but value equality and init-only properties fight change
+> tracking.
+>
+> **Nullable.** With Nullable enabled, `string` means never null and `string?` may be null. The compiler warns when
+> I assign null to a string or dereference a string? without checking. It's compile time only: at runtime a string
+> can still be null (from JSON, `null!`), like TypeScript's strictNullChecks. EF also reads it for the column:
+> ImportRun's `string? CorrelationId` gives a NULL column, so the migration just adds it and runs from before 12b
+> keep NULL. A `string` would give NOT NULL, and the migration would need a default for the existing rows or fail.
+>
+> **required vs [Required].** `required` (C# keyword, Company.Orgnr) is checked by the compiler when my code creates
+> the object: `new Company { Name = "x" }` without Orgnr doesn't compile. It checks that I set it, not the value
+> (`null!` compiles). It protects my own code. `[Required]` (attribute, LoginRequest.Username) is checked at runtime
+> by model validation when a request arrives: missing, null or "" makes the model invalid and [ApiController]
+> returns a 400 before Login runs, like a Laravel FormRequest rule. It protects me from the client. Neither depends
+> on class vs record.
 
 ## 8. IHttpClientFactory, and why not `new HttpClient()`
 
@@ -186,11 +273,29 @@ and resilience (retries, timeouts, circuit breaker) in one place.
 jitter, a per-attempt and a total timeout, and a circuit breaker that stops hammering a service that is down. It's built on Polly.
 
 **In my words:**
-> new HttpClient() per call exhausts sockets under load, because closed sockets linger for minutes. One static client
-> forever never notices DNS changes. IHttpClientFactory pools connections and recycles them, which fixes both. A typed
-> client like BrregClient also keeps the base address, headers and resilience in one place in Program.cs. The standard
-> resilience handler adds retries with backoff for temporary errors, timeouts, and a circuit breaker that stops calling
-> a failing service for a while.
+> **The problem.** The HttpClient object is cheap; the handler inside it (SocketsHttpHandler) owns the TCP
+> connections. A new HttpClient per call means new connections every time, and after Dispose each closed socket
+> stays in TIME_WAIT for a few minutes, so under load the app runs out of ports: socket exhaustion. One static
+> client forever reuses connections, which is good, but it never looks up DNS again, so if Brreg moves to a new IP
+> it keeps calling the old one.
+>
+> **The factory.** IHttpClientFactory keeps a pool of handlers, reuses each for a while (2 minutes by default) and
+> then rotates it out: connection reuse and fresh DNS.
+>
+> **Typed client.** I never name IHttpClientFactory in practice2, because `AddHttpClient<BrregClient>(...)` registers the factory
+> and tells DI: when someone needs a BrregClient, get an HttpClient from the factory with this configuration
+> (BaseAddress, the User-Agent) and pass it to the constructor. That's a typed client: BrregClient just calls
+> relative URLs, and all Brreg HTTP settings live in one place in Program.cs, like an axios.create({ baseURL })
+> instance. The other style is a named client, `factory.CreateClient("brreg")`.
+>
+> **Resilience.** AddStandardResilienceHandler (Polly) adds retries on temporary failures (5xx, 408, 429, timeouts)
+> with exponential backoff and jitter between attempts, a per-attempt and a total timeout, and a circuit breaker
+> that, after many failures, stops calling for a while and fails fast.
+>
+> **The handler chain.** Outgoing requests pass through a chain of handlers, an onion like middleware: BrregClient →
+> HttpClient → resilience handler → primary handler → network. In 13c, ConfigurePrimaryHttpMessageHandler swapped
+> only the innermost piece for FakeBrregHandler; the resilience handler still wraps it, so a 503 from the fake would
+> be retried.
 
 ## 9. BackgroundService / IHostedService: the cron equivalent
 
@@ -207,13 +312,31 @@ get three imports. Fixes: a database lock or lease, a real message queue, or run
 (Azure Function, Kubernetes CronJob). This project is single-instance by design.
 
 **In my words:**
-> A BackgroundService is a hosted service that starts with the app and lives in the same process, the .NET version
-> of a cron job or a queue worker. The controller writes a run id with `queue.EnqueueAsync(run.Id, ct)`, and the worker,
-> awaiting `foreach` over `queue.ReadAllAsync()`, picks it up and runs the import in its own DI scope. Awaiting the
-> channel holds no thread while the queue is empty. The queue lives in memory, so if the app stops, queued run ids are
-> lost and the running import stays "Running". Pages already saved stay, and the upsert makes a re-run safe. The
-> defence is to mark Running and Queued runs as Abandoned on startup. For more than one instance I'd move the queue to
-> the database or a message broker.
+> **What it is.** A BackgroundService is a class registered in Program.cs with `AddHostedService<ImportWorker>()`.
+> It starts with the app (ExecuteAsync runs once at startup), lives in the same process, shares DI, config and
+> logging with the API, and stops with the app. stoppingToken fires when the app shuts down (Ctrl+C, a deploy,
+> SIGTERM); the worker passes it to the importers, so an import in progress is cancelled instead of killed in the
+> middle of a write. It's like Laravel's `queue:work`, but inside the API process. A cron job is time-based (run at
+> 02:00); ImportWorker is job-based: it waits on the Channel for run ids (a time-based one would loop on a
+> PeriodicTimer).
+>
+> **202 + Channel.** POST /api/imports saves a Queued run row, puts its id in the Channel and returns 202 Accepted
+> with Location /api/imports/{id}. Running the import inside the request would break three ways: it takes over a
+> minute, so the client, proxy or load balancer times out; if the user closes the tab, RequestAborted cancels it;
+> and the client gets no progress. With the hand-off, the import no longer depends on the HTTP connection, and the
+> run row is the progress the client polls. While the queue is empty, `await foreach` over `queue.ReadAllAsync` is
+> awaiting and holds no thread; the next EnqueueAsync wakes it.
+>
+> **Restart.** On a restart, the Running run is cancelled by stoppingToken partway: pages already saved stay (the
+> upsert makes a re-run safe) and the row still says Running. The Queued run's id existed only in the in-memory
+> Channel, so it's gone and the row says Queued forever. Because POST returns 409 while a run is Queued or Running,
+> no import could start again. So ExecuteAsync first calls MarkUnfinishedRunsAbandonedAsync: one ExecuteUpdate sets
+> them to Abandoned.
+>
+> **Three instances.** With three instances, each has its own Channel and worker: a restarting instance marks
+> Abandoned a run another instance is still running; two POSTs at the same moment on two instances can both pass the
+> 409 check; and a queued id dies with its instance. The fix is one shared queue: the database as the queue (claim a
+> run with a row lock, `FOR UPDATE SKIP LOCKED`) or a message broker (RabbitMQ, Azure Service Bus).
 
 ## 10. Configuration and options: appsettings.json, IOptions<T>
 
@@ -228,13 +351,34 @@ to start with invalid config.
 (double underscore = section separator).
 
 **In my words:**
-> Configuration is layered: appsettings.json, then the environment's appsettings file, then user secrets in
-> Development, then environment variables, then command-line arguments. The later source wins, so one image runs
-> everywhere and only the environment changes. .NET doesn't read .env files; the host sets real environment variables
-> before the app starts. Locally, secrets live in user secrets, outside the repo. In production they come from the
-> host's environment variables, or from a vault like Key Vault that the app reads at startup, which adds rotation in
-> one place, an audit log and access per secret. Never in git, appsettings.json or the image. I bind sections to typed
-> options classes and validate them on start, so a missing setting stops the app immediately.
+> **Layers.** A setting like Jwt:SigningKey comes from layers, and the later one wins: appsettings.json,
+> appsettings.{Environment}.json, user secrets (Development only), environment variables, command-line arguments.
+>
+> **Where the key comes from.** Locally it's Development, so the key comes from user secrets: the csproj's
+> UserSecretsId names the folder ~/.microsoft/usersecrets/<id>/secrets.json, outside the repo. The tests run as
+> UseEnvironment("Testing"), so user secrets aren't loaded even on my machine, and ApiFactory sets its own key with
+> UseSetting; that also makes them work in CI. In production it's the environment variable Jwt__SigningKey (a double
+> underscore stands for `:`), set by the host and often loaded from a vault like Key Vault (rotation, access
+> control, an audit log); a file on the server with tight permissions is another option. Never in git,
+> appsettings.json or the image.
+>
+> **The options chain.** `AddOptions<JwtOptions>()` registers it, so a constructor asking for IOptions<JwtOptions>
+> gets a filled object. `.Bind(GetSection("Jwt"))` fills it from the Jwt section of the merged configuration, all
+> layers: Issuer from appsettings.json, SigningKey from user secrets or the environment.
+>
+> **Validation.** `.ValidateDataAnnotations()` checks the attributes on JwtOptions against my configuration, not a
+> client: [Required] (not null or empty, and the default is ""), [MinLength(32)] (HMAC-SHA256 needs a 256-bit key),
+> [Range(1, 1440)] for LifetimeMinutes. `.ValidateOnStart()` runs that check at startup, at runtime: a missing key
+> means the app refuses to start and the deploy fails at once. Without it the check is lazy, on the first
+> options.Value: the app looks healthy, and the first login or authenticated request gets a 500. Better to find out
+> from the deploy than from a user.
+>
+> **Why IOptions.** IOptions<JwtOptions> beats `configuration["Jwt:SigningKey"]` because it's typed (LifetimeMinutes
+> is an int, not a string? to parse and null-check everywhere), validated once in one place, the section and
+> property names are written once instead of as string literals where a typo silently returns null, and it's
+> testable: `new TokenService( Options.Create(new JwtOptions { ... }))` needs no configuration at all. IOptions<T>
+> is a singleton read once, so the singleton TokenService can take it safely; IOptionsSnapshot<T> (scoped, re-read
+> per request) and IOptionsMonitor<T> (sees changes live) are its siblings.
 
 ## 11. Authentication vs authorisation, policies, claims, scopes
 
@@ -257,12 +401,33 @@ the `AddJwtBearer` configuration only; policies and controllers stay the same.
 (`sub` → `http://schemas.xmlsoap.org/.../nameidentifier`). Turning it off keeps claim names as they are in the token.
 
 **In my words:**
-> Authentication is who you are: the API validates the JWT's signature, issuer, audience and expiry. If that fails,
-> 401. Authorisation is what you may do: a policy checks the token's claims. A claim is any fact in the token, like
-> client_id or exp, and the scope claim lists the permissions. The import endpoint's policy requires the
-> companies.import scope, so a valid reader token gets 403. A JWT is signed, not encrypted: anyone can read the claims,
-> but nobody can change them without breaking the signature. Maskinporten works the same way: it issues the token with
-> the scopes, and the API checks them.
+> **401 vs 403.** Authentication is who you are: the JWT bearer handler validates the token, and if it's missing or
+> invalid the answer is 401 (officially "Unauthorized", but it means unauthenticated). Authorisation is what you may
+> do: a policy checks the claims, and a known caller without the right scope gets 403. From the tests: GET
+> /api/companies without a token is 401; the reader (only companies.read) calling POST /api/imports is 403. Laravel:
+> auth middleware vs Gates/`can:`.
+>
+> **The token.** Practice2's JWT carries iss, aud, exp, sub (the user id; client_id is the machine-client claim in
+> Maskinporten-style tokens, as in the first project), name (the username) and one scope claim per scope. It's
+> header.payload.signature, where header and payload are base64, not encrypted: anyone can read them, so no secrets
+> in a JWT. The signature is HMAC-SHA256 over "header.payload" with the signing key.
+>
+> **Why it's trusted.** The API trusts a token without a database lookup by recomputing that HMAC with its own key
+> and comparing it with the signature: a match means it was made by someone holding the key and nothing changed
+> since; then it checks iss, aud and exp. If the payload is changed (say a scope added) or the signature is, they
+> don't match: 401, as in the tampered-signature test. The trade-off of stateless tokens: one can't be revoked
+> before it expires without adding state back (a deny-list, short tokens + refresh).
+>
+> **Fallback policy.** The fallback policy, RequireAuthenticatedUser, applies to every endpoint that has no auth
+> attribute of its own: it's the safety net, deny by default, so a new controller someone forgets to mark is
+> protected instead of silently public.
+>
+> **Policies and [AllowAnonymous].** The policies companies.read and companies.import require a scope claim with
+> exactly that value; [Authorize(Policy = ...)] on a class covers all its actions (Companies and Roles need read,
+> Imports needs import). [AllowAnonymous] is the deliberate opening: on AuthController (you can't need a token to
+> get one) and on GET /api/companies/{orgnr}, the public company page, while /roles in the same class still needs
+> companies.read. Maskinporten works the same way: it issues the token with the scopes, and only the AddJwtBearer
+> setup would change.
 
 ## 12. ILogger<T> and structured logging
 
@@ -278,11 +443,40 @@ filter on.
 and the string is built even when that log level is off.
 
 **In my words:**
-> With a message template, the values stay as named fields, so a log tool can filter, group and sum on them, like all
-> imports where Rejected is above zero. String interpolation turns them into plain text, which only regex can search.
-> JSON is just one way to print those fields. The correlation id is one of them, attached to every line of a request,
-> so when a user reports an error with that id, I find exactly that request's logs among all the concurrent ones, even
-> into the background job. That is traceability.
+> **Templates.** `logger.LogInformation("Import run {RunId} started", runId)` keeps RunId as a named field next to
+> the message, so Seq or Application Insights can filter (RunId = 15), group, count and average on it, and every
+> "started" line shares one template, so they group as one event type. `$"Import run {runId} started"` makes a
+> finished string: the field is lost and only text or regex search is left. It's also built before the call even
+> when that level is off, meaning the line's level is below its category's minimum (a LogDebug while the minimum is
+> Information): C# builds the string as an argument, then the logger drops it. A template lets the logger check the
+> level first and format only if the line is written; in a loop over 100,000 companies that's 100,000 strings saved.
+> JSON is just one way to print the fields.
+>
+> **Category.** The T in ILogger<ImportWorker> sets the category, the class's full name
+> Practice2.Api.Import.ImportWorker: it's shown on each line, so I know where it came from, and it's the name the
+> appsettings keys match against: Logging > LogLevel > "<category or prefix>": "<level>", e.g.
+> "Practice2.Api.Import.ImportWorker": "Debug".
+>
+> **Levels.** The levels from low to high: Trace < Debug < Information < Warning < Error < Critical, and a setting
+> is the minimum written. "Default": "Information" covers every category without a more specific rule.
+> "Microsoft.AspNetCore": "Warning" applies to categories starting with that name (prefix match, the longest wins)
+> and hides the framework's per-request Information lines; my own request log line replaces them. In Development,
+> "Microsoft.EntityFrameworkCore.Database.Command": "Information" logs every SQL statement EF sends.
+>
+> **Without a redeploy.** To see Debug in production without a redeploy, it's configuration: set
+> Logging__LogLevel__Default=Debug (or narrower, Logging__LogLevel__Practice2.Api.Import=Debug) and restart, or edit
+> appsettings.json on disk, which is watched and reloaded live.
+>
+> **Request scope.** CorrelationIdMiddleware is first in the pipeline. It opens `using var scope =
+> logger.BeginScope("CorrelationId {CorrelationId}", id)` and then calls `await next(context)`, the rest of the
+> pipeline. A scope belongs to the async flow (an AsyncLocal), not to one logger, so every logger writing inside it
+> adds the id as a field to its lines: the controller, EF, the auth handler, and the middleware's own finally line.
+>
+> **Worker scope.** ImportWorker isn't in that flow: its ExecuteAsync started at app startup, and by the time it
+> picks up a run id the request has ended (202) and its scope is closed; the Channel carries only the id. So 12b
+> stores the id on the import_runs row, and the worker opens its own scope from run.CorrelationId, covering the
+> importers, EF, HttpClient and Polly for that run. Scopes nest, adding fields to the outer one; they don't replace
+> it.
 
 ## 13. xUnit: facts, theories, WebApplicationFactory
 
@@ -300,12 +494,45 @@ without a running Nginx.
 tested against the real database, not an in-memory fake.
 
 **In my words:**
-> A Fact is a single test. A Theory runs the same test for each InlineData row, for when only the data changes. Unit
-> tests check one piece of logic, like MOD11, across all its edge cases in milliseconds. Integration tests boot the
-> real app with WebApplicationFactory against a real Postgres container from Testcontainers, and catch what unit tests
-> can't: routing, auth, middleware, EF and SQL, and migrations. So I put edge cases in unit tests and one integration
-> test per behaviour to prove it's wired up (the test pyramid). A test only checks what it calls, so an endpoint
-> without a test is untested, and a test must fail for the reason its name says.
+> **Fact vs Theory.** [Fact] is one test with no parameters that runs once; [Theory] + [InlineData] runs the same
+> test once per row, and each row is reported as its own test, for when only the data changes (PHPUnit's
+> dataProvider, Jest's test.each). That's independent of unit vs integration: OrgnrTests has both
+> (Rejects_invalid_values is a Theory, the check-digit-10 prefix is a Fact), and so does AuthorizationTests (the 401
+> Theory over four URLs).
+>
+> **Unit vs integration.** OrgnrTests is a unit test: it calls Orgnr.IsValid directly, no app, no HTTP, no database,
+> in milliseconds, so it covers every MOD11 edge case (length, null, "", non-digits, the check digit), but it can't
+> prove an endpoint uses the rule. AuthorizationTests is an integration test: real HTTP through the whole app,
+> proving the wiring no unit test can (middleware order, JWT validation, policies, the fallback policy,
+> [AllowAnonymous]); it doesn't touch orgnr. That an endpoint uses MOD11 is proved once by RolesTests (123456789 →
+> 400). Edge cases in unit tests, one integration test per behaviour: the test pyramid.
+>
+> **WebApplicationFactory.** WebApplicationFactory<Program> runs my real Program.cs (DI, middleware, auth, EF) in
+> memory without a port; CreateClient() gives an HttpClient that talks to it directly, like a Laravel feature test's
+> getJson. Before it starts I can override configuration (UseSetting) and services (ConfigureTestServices).
+>
+> **Real Postgres.** Testcontainers gives each factory a throwaway postgres:17-alpine, so queries, the migrations
+> themselves, constraints, unique indexes, transactions and snake_case names run as in production. EF's InMemory
+> provider isn't relational (no SQL, no constraints), and SQLite is a different engine (no ILIKE, different types).
+>
+> **Migrate and seed first.** ApiFactory migrates before the app starts because ImportWorker starts with the app and
+> immediately runs MarkUnfinishedRunsAbandonedAsync, an UPDATE on import_runs; without the table it fails. EF itself
+> doesn't check the schema at startup, only when a query hits a missing table. It seeds first because tests need
+> known data: admin and reader with hashed passwords to log in, and company 974760673 with three unsorted roles, so
+> a test can assert DAGL, MEDL, REVI.
+>
+> **Collections.** Each [CollectionDefinition] with ICollectionFixture<ApiFactory> gets its own ApiFactory: its own
+> app, container and database. Tests inside a collection run one after another; collections run in parallel. The
+> import writes: the role import replaces the roles of every company in its database, so in the shared "api"
+> database it would wipe the seeded roles, and Company_roles_are_sorted_by_rank would fail only when the import ran
+> first. Rule: read-only tests share a database; a test that changes shared data gets its own.
+>
+> **Flaky.** A flaky test is one that sometimes passes and sometimes fails on the same code, because of timing, test
+> order or an outside system; people learn to ignore red.
+>
+> **Fake Brreg.** ImportTests fakes Brreg because a test must be fast, repeatable and offline, and the real Brreg
+> takes over a minute, needs the network, can be down or rate-limit, and its data changes daily, so Inserted = 1,
+> Rejected = 1, RolesSaved = 1 could never be asserted. Everything above the handler stays real.
 
 ---
 
