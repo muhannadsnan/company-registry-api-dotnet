@@ -14,7 +14,7 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 | Part 3 step | What | Status |
 |---|---|---|
 | 1 | Create the app (Vite, React, TypeScript), Prettier, a proxy to the API | ✅ |
-| 2 | Login page: form, `POST /api/auth/login`, save the session in `localStorage` | ⏳ |
+| 2 | Login page: form, `POST /api/auth/login`, save the session in `localStorage` | ✅ |
 | 3 | `apiFetch` sends the token, and a typed API client | ⏳ |
 | 4 | Search form with loading and error states | ⏳ |
 | 5 | Paging, with a component and props | ⏳ |
@@ -427,6 +427,10 @@ Rule: every value from the component that the effect *uses* goes in the list. ES
 | `npm run dev` gave ENOENT `package.json` | Wrong folder; run it inside `web/` |
 | (Part 3) The proxy in `package.json` under `"server"`: the page showed the app, not JSON | Vite never reads `package.json` for settings (that was Create React App). Vite's settings go in `vite.config.ts` |
 | (Part 3) `"format": "prettier"`, then the full command added at the top level of `package.json` | `prettier` without files and `--write` does nothing; and `npm run` only reads `"scripts"` |
+| (Part 3) The `return (<form>…)` inside `handleSubmit`: "LoginPage cannot be used as a JSX component" | The handler ends with its own `}`; the **component** returns the JSX |
+| (Part 3) `FormEvent` struck through in the editor | Deprecated in `@types/react` 19.3: use `SubmitEvent<HTMLFormElement>`. Strike-through = deprecated |
+| (Part 3) `class="logout"` on a button | JSX uses `className` (`class` is a JS keyword); tsc rejects `class` |
+| (Part 3) `role="error"`, then `role="akert"` | `role` is a plain string, so tsc can't catch it; the ARIA role is `alert` |
 
 ---
 
@@ -569,6 +573,7 @@ useEffect(() => {
 | File | Role | Vue equivalent |
 |---|---|---|
 | `session.ts` | Load, save and clear the session in `localStorage`; an expired one counts as none | |
+| `LoginPage.tsx` | The form; posts to the login endpoint, saves the session, calls `onLogin` | a component that `emit`s |
 | `AuthContext.ts` | `createContext` + my custom hook `useAuth()` | `inject()` |
 | `AuthProvider.tsx` | Holds `session` state, `login`, `logout`, and the expiry timer; wraps the app | `provide()` |
 | `RequireAuth.tsx` | `session ? <Outlet /> : <Navigate to="/login" replace />` | `router.beforeEach` |
@@ -611,6 +616,40 @@ async function apiFetch(url: string, init?: RequestInit): Promise<Response> {
 - **Context and component in separate files:** a `.tsx` file should export only components, or hot
   reload stops working for it (Oxlint's `only-export-components`).
 - **Hiding the Imports link is convenience, not security.** The API's policy is the real check (403).
+
+**The login page (Part 3, step 2).** `Session` mirrors the API's `LoginResponse`: `{ token, expiresAt,
+username, scopes }` (Part 2's API answered `accessToken`). Before there's a context, `App` holds the session:
+```tsx
+// LoginPage.tsx: the handler is a function INSIDE the component; the component returns the form
+export default function LoginPage({ onLogin }: Props) {
+    const [username, setUsername] = useState('')   // '' not null: an input always holds a string
+    const [error, setError] = useState<string | null>(null)
+    // ...password, busy
+
+    async function handleSubmit(e: SubmitEvent<HTMLFormElement>) {   // not FormEvent (deprecated)
+        e.preventDefault()                      // no full page reload
+        const response = await fetch('/api/auth/login', { method: 'POST',
+            headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password }) })
+        if (response.status === 401) return setError('Wrong username or password')
+        const session: Session = await response.json()   // await: the body arrives after the headers
+        saveSession(session)
+        onLogin(session)                        // tell the parent: Vue's emit('login', session)
+    }
+
+    return <form onSubmit={handleSubmit}>...<input value={username} onChange={(e) => setUsername(e.target.value)} />...</form>
+}
+
+// App.tsx
+const [session, setSession] = useState(loadSession)   // a function: runs once, on the first render
+if (!session) return <LoginPage onLogin={setSession} />
+```
+- **`value` + `onChange`** = Vue's `v-model`: the state is the truth, the input shows it.
+- **`onLogin={setSession}`:** the child calls the parent's setter; App re-renders with a session.
+- **localStorage vs a cookie:** localStorage is never sent anywhere, only JS reads it, so any script on
+  the page (an XSS bug, a bad package) can steal the token. The alternative: an **HttpOnly cookie** set
+  by the server (JS can't read it; needs CSRF protection), or a **BFF** (the token stays on a server).
+  localStorage is the common SPA choice for a short-lived token (120 minutes here); React escapes text.
+- **The same message for both failures:** stops **user enumeration** (finding which usernames exist).
 
 ## 10. More Vue to React
 

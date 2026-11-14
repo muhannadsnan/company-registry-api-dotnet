@@ -2888,6 +2888,10 @@ importer and worker run against fixed data; a test that writes gets its own data
 | 12 | Import page with polling (link only for users with `companies.import`) | |
 
 ### practice3 (ideas)
+- **Reminder, quality gates (the common enterprise setup):** the editor checks while typing; a
+  pre-commit hook with **husky + lint-staged** (ESLint + Prettier on staged files, common but not
+  universal); and **CI as a required check** on every push/PR (`tsc -b`, lint, tests, build), which is
+  universal. Decide in practice3 whether to add it (fits with the brief's CI test matrix).
 - **Persons derived from roles:** a `persons` table, and roles that point to it.
   - The hard part: Brreg gives no national ID number, so the same person can only be matched by name +
     birth date, and that isn't always unique. A real data-modelling problem.
