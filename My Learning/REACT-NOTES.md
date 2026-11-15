@@ -16,7 +16,7 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 | 1 | Create the app (Vite, React, TypeScript), Prettier, a proxy to the API | ✅ |
 | 2 | Login page: form, `POST /api/auth/login`, save the session in `localStorage` | ✅ |
 | 3 | `apiFetch` sends the token, and a typed API client | ✅ |
-| 4 | Search form with loading and error states | ⏳ |
+| 4 | Search form with loading and error states | ✅ |
 | 5 | Paging, with a component and props | ⏳ |
 | 6 | Router and the company page (400/404) | ⏳ |
 | 7 | Roles on the company page | ⏳ |
@@ -240,80 +240,62 @@ useEffect(() => {
 }, [session])                          // runs again when session changes; hooks before any early return
 ```
 
-### src/page/SearchPage.tsx: state, form, list
+### SearchPage.tsx: state, form, list (best version: Part 3, step 4)
 
 ```tsx
-import {Link} from 'react-router'
-import {useState, type FormEvent} from 'react'
-import {searchCompanies, type Company} from '../api'
-
 export default function SearchPage() {
-    const [name, setName] = useState('')
-    const [companies, setCompanies] = useState<Company[]>([])
-    const [totalCount, setTotalCount] = useState<number | null>(null)
-    const [loading, setLoading] = useState(false)
+    const [name, setName] = useState('')    // the input: changes on every keystroke
+    const [query, setQuery] = useState('')  // what was searched: changes only on Submit
+    const [result, setResult] = useState<PageResult<CompanyDto> | null>(null)
     const [error, setError] = useState<string | null>(null)
+    const [loading, setLoading] = useState(true) // true: the first search starts on mount
 
-    async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-        event.preventDefault()
-        setLoading(true)
-        setError(null)
-        try {
-            const result = await searchCompanies(name)
-            setCompanies(result.items)
-            setTotalCount(result.totalCount)
-        } catch(e) {
-            setError(e instanceof Error ? e.message : 'Something went wrong')
-        } finally {
-            setLoading(false)
-        }
+    useEffect(() => {
+        let ignore = false                  // this run's own flag
+        searchCompanies(query)
+            .then((data) => { if (!ignore) { setResult(data); setError(null) } })
+            .catch((e) => {
+                if (!ignore) {
+                    setResult(null)         // no stale table under the error
+                    setError(e instanceof ApiError ? `Search failed (${e.status})` : 'Could not reach the server')
+                }
+            })
+            .finally(() => { if (!ignore) setLoading(false) })
+        return () => { ignore = true }      // cleanup: before the next run, or when the page goes away
+    }, [query])
+
+    function handleSubmit(e: SubmitEvent<HTMLFormElement>) {
+        e.preventDefault()
+        const trimmedName = name.trim()
+        if (trimmedName === query) return   // same query: the effect won't rerun, loading would hang
+        setLoading(true)                    // setState in an event handler: the right place
+        setQuery(trimmedName)
     }
-
-    return (
-        <main>
-            <h1>Company search</h1>
-
-            <form onSubmit={handleSubmit}>
-                <input
-                    value={name}
-                    onChange={ (e) => setName(e.target.value) }
-                    placeholder='Company name, e.g. bil'
-                />
-                <button type="submit" disabled={loading}>
-                    {loading ? 'Searching...' : 'Search'}
-                </button>
-            </form>
-
-            {error && <p role="alert">{error}</p>}
-            {totalCount !== null && <p>{totalCount} companies found</p>}
-
-            <table>
-                <thead>
-                    <tr>
-                        <th>Orgnr</th>
-                        <th>Navn</th>
-                        <th>Form</th>
-                        <th>Kommune</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {companies.map((c) => (
-                        <tr key={c.organisationNumber}>
-                            <td>{c.organisationNumber}</td>
-                            <td>
-                                <Link to={`/companies/${c.organisationNumber}`}>{c.name}</Link>
-                            </td>
-                            <td>{c.organisationFormCode}</td>
-                            <td>{c.address.postalPlace}</td>
-                        </tr>
-                    ))}
-                </tbody>
-            </table>
-        </main>
-    )
+    // render: the form; {loading && …}; {!loading && error && <p role="alert">…}; the table with key={c.orgnr}
 }
 ```
 
+**Questions and answers**
+- **Why `name` and `query`?** `name` follows every keystroke; `query` changes only on Submit. The effect
+  depends on `[query]`, so typing sends no requests, only Search does.
+- **Loading, error, data:** without loading the page looks frozen and people click again; without error
+  a failure looks like "no results".
+- **The race (`ignore`):** search "A", then quickly "B". If A answers last it would overwrite B's table.
+  When `query` changes, React runs the old effect's cleanup first (`ignore = true` for *that* run), so
+  A's late answer is dropped.
+- **`key`:** lets React match rows between renders (Vue's `:key`); without it the wrong DOM is reused.
+- **Why `loading` isn't set inside the effect:** `setLoading(true)` directly in an effect's body is
+  rejected by ESLint (react-hooks `set-state-in-effect`: an extra render). `setX` in a callback that runs
+  **later** (`.then`, after `await`, a timer, a subscription) or in an **event handler** is fine.
+- **The derived alternative (also fine, can't get out of sync):** one state `loaded = { query, result?,
+  error? }` set in `.then`/`.catch`, and `const loading = loaded?.query !== query`, a Vue `computed`:
+  read-only, recalculated each render. No "same query" trap.
+- **`{ query, result }`** is shorthand for `{ query: query, result: result }`: the variable names become
+  the keys, so they must match the type's properties (or write `result: data`). TS catches a mismatch.
+- **`typeof` vs `instanceof`:** `typeof e` is just `'object'` for any error; `e instanceof ApiError`
+  checks the class (PHP's `instanceof`).
+- **`useState` returns a pair, named by position:** `[total, setTotal]` is a convention;
+  `const [setTotal] = useState()` would name the *value*. Skip the value with `const [, setTotal]`.
 - **`useState`** = Vue's `ref()`. `[value, setValue]`; never assign directly, because calling the setter is what makes React redraw.
 - **`useState<Company[]>([])`**: TypeScript can't tell what an empty `[]` will hold, so the type is given.
 - **`value` + `onChange`** = `v-model`, written out (a "controlled input").
@@ -321,7 +303,6 @@ export default function SearchPage() {
 - **`try / catch / finally`** gives three UI states: loading, error, result.
 - **`{cond && <p/>}`** = `v-if`. **`array.map(...)`** = `v-for`. **`key`** = `:key`.
 - **`type Company` in an import** is a type-only import; it disappears from the compiled JavaScript.
-- To fix: the "Kommune" column shows `postalPlace` (poststed). Rename it to "Poststed", or show `municipality`.
 
 ### src/page/CompanyPage.tsx: URL parameter + loading data
 
@@ -431,6 +412,7 @@ Rule: every value from the component that the effect *uses* goes in the list. ES
 | (Part 3) `class="logout"` on a button | JSX uses `className` (`class` is a JS keyword); tsc rejects `class` |
 | (Part 3) `role="error"`, then `role="akert"` | `role` is a plain string, so tsc can't catch it; the ARIA role is `alert` |
 | (Part 3) `` `/api/companies/${params}` ``: the API log showed **400** | Again `/` instead of `?` (as in Part 1): the query became an orgnr and failed MOD11. TS checks types, not URLs |
+| (Part 3) Step 3's proof (`total` + its effect) left in App.tsx: tsc "declared but never read" | Remove what a step replaces; an effect with only `if (...) return` does nothing |
 | (Part 3) `app.ts` for the API client | Name it `api.ts`: `app.ts` next to `App.tsx` invites import mix-ups (case-insensitive file systems) |
 
 ---
