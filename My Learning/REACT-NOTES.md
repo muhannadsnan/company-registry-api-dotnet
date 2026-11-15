@@ -17,7 +17,7 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 | 2 | Login page: form, `POST /api/auth/login`, save the session in `localStorage` | ✅ |
 | 3 | `apiFetch` sends the token, and a typed API client | ✅ |
 | 4 | Search form with loading and error states | ✅ |
-| 5 | Paging, with a component and props | ⏳ |
+| 5 | Paging, with a component and props | ✅ |
 | 6 | Router and the company page (400/404) | ⏳ |
 | 7 | Roles on the company page | ⏳ |
 | 8 | Search kept in the URL | ⏳ |
@@ -414,6 +414,8 @@ Rule: every value from the component that the effect *uses* goes in the list. ES
 | (Part 3) `` `/api/companies/${params}` ``: the API log showed **400** | Again `/` instead of `?` (as in Part 1): the query became an orgnr and failed MOD11. TS checks types, not URLs |
 | (Part 3) Step 3's proof (`total` + its effect) left in App.tsx: tsc "declared but never read" | Remove what a step replaces; an effect with only `if (...) return` does nothing |
 | (Part 3) `app.ts` for the API client | Name it `api.ts`: `app.ts` next to `App.tsx` invites import mix-ups (case-insensitive file systems) |
+| (Part 3) Search guard `if (trimmedName === query) return` without `&& page === 1` | On page 3, Search with the same text did nothing. The guard must check **every** state the submit changes (query and page) |
+| (Part 3) Quiz: "what if `page` is missing from the deps" answered as if it were there | Missing dep = the effect doesn't rerun when it changes: Next shows "Loading..." forever, no fetch |
 
 ---
 
@@ -466,29 +468,74 @@ with a Prettier config are formatted (the real `web/` keeps its 2 spaces).
 
 ## 9. The code worth remembering
 
-### Props and a callback: `Paginator.tsx`
+### Props and a callback: `Paginator.tsx` (best version: Part 3, step 5)
+
+`src/components/Paginator.tsx` (`components/` = reusable pieces, `pages/` = whole screens):
 
 ```tsx
-type PaginatorProps = {
+type Props = {
     page: number
-    totalPages: number
-    onPageChange: (page: number) => void
+    pageSize: number
+    totalCount: number
+    onPageChange: (page: number) => void // only the TYPE: "give me a function that takes a number"
 }
 
-function Paginator({ page, totalPages, onPageChange }: PaginatorProps) {
+export default function Paginator({ page, pageSize, totalCount, onPageChange }: Props) {
+    const totalPages = Math.max(1, Math.ceil(totalCount / pageSize))
     return (
         <nav className="paginator">
-            <button disabled={page <= 1} onClick={() => onPageChange(page - 1)}>Previous</button>
+            <button onClick={() => onPageChange(page - 1)} disabled={page <= 1}>Prev</button>
             <span>Page {page} of {totalPages}</span>
-            <button disabled={page >= totalPages} onClick={() => onPageChange(page + 1)}>Next</button>
+            <button onClick={() => onPageChange(page + 1)} disabled={page >= totalPages}>Next</button>
         </nav>
     )
 }
 ```
 
-- **Props** are the component's typed parameters (Vue's `defineProps`).
-- **`onPageChange`** is Vue's `emit`: the child doesn't change the page, it *asks* the parent to.
-  Data flows down; changes flow up through callbacks.
+The changes in `SearchPage.tsx`:
+
+```tsx
+const [page, setPage] = useState(1)
+
+useEffect(() => {
+    // ... searchCompanies(query, page) ...
+}, [query, page]) // rerun when either changes
+
+function handleSubmit(e: SubmitEvent<HTMLFormElement>) {
+    e.preventDefault()
+    const trimmedName = name.trim()
+    if (trimmedName === query && page === 1) return // nothing would change: the effect wouldn't rerun
+    setLoading(true)
+    setQuery(trimmedName)
+    setPage(1) // a new search starts at page 1
+}
+
+function handlePageChange(newPage: number) {
+    setLoading(true) // setState in an event handler is fine
+    setPage(newPage)
+}
+
+// under the table:
+<Paginator page={result.page} pageSize={result.pageSize} totalCount={result.totalCount} onPageChange={handlePageChange} />
+```
+
+**Where `page` really changes.** The component that owns a state is the only one that changes it. `page` lives in SearchPage (it needs it for the fetch); Paginator gets a read-only copy as a prop.
+
+```
+SearchPage:  onPageChange={handlePageChange}          "here's my function"
+Paginator:   onClick={() => onPageChange(page + 1)}   calls it with 4 → runs handlePageChange(4)
+             → setPage(4) → SearchPage re-renders → the effect sees page changed → fetch page 4
+             → the new result.page = 4 flows back into Paginator as a prop
+```
+
+**Vue:** `this.page += 1` works for a component's **own** data. For a prop, Vue warns too ("avoid mutating a prop") and you `emit('page-change', page + 1)`, the parent listens with `@page-change`. React has no emit: the parent passes a function as a prop (named `onX` by convention) and the child calls it. Props down, callbacks up. The payoff: Paginator knows nothing about searching, so it's reusable on any list.
+
+#### Questions and answers
+
+1. **Why doesn't Paginator call `setPage` itself?** page is SearchPage's state, so only SearchPage changes it. Paginator gets the value as a prop and a callback `onPageChange`; it calls the callback and the parent runs setPage. Props down, callbacks up. In Vue: emit.
+2. **Why does a new search go back to page 1?** A new query has a different number of results; staying on page 50 could be past the end (empty, or a 400).
+3. **What if `page` is missing from the deps `[query, page]`?** The effect only reruns on query changes. Clicking Next changes page and shows "Loading...", but no fetch happens, so the table never updates. ESLint's `exhaustive-deps` warns about it.
+4. **Why disable the buttons at the ends? What does the API answer for `page=0`?** There's no data there. The API has `[Range(1, 1000)]` on Page, so page=0 gives **400 Bad Request**. Disabling is a UX guard; the API validation is the real one.
 
 ### State in the URL: `SearchPage.tsx`
 

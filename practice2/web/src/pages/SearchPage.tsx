@@ -1,5 +1,6 @@
 import { useEffect, useState, type SubmitEvent } from 'react'
 import { ApiError, searchCompanies, type CompanyDto, type PageResult } from '../api'
+import Paginator from '../components/Paginator'
 
 export default function SearchPage() {
     const [name, setName] = useState('') // what's in the input
@@ -8,9 +9,11 @@ export default function SearchPage() {
     const [error, setError] = useState<string | null>(null)
     const [loading, setLoading] = useState(true) // true: the first search starts right away
 
+    const [page, setPage] = useState(1)
+
     useEffect(() => {
         let ignore = false // set when this search is outdated
-        searchCompanies(query)
+        searchCompanies(query, page)
             .then((data) => {
                 if (!ignore) {
                     setResult(data)
@@ -29,14 +32,20 @@ export default function SearchPage() {
         return () => {
             ignore = true // cleanup: runs before the next search, or when the page goes away
         }
-    }, [query])
+    }, [query, page])
 
     function handleSubmit(e: SubmitEvent<HTMLFormElement>) {
         e.preventDefault()
         const trimmedName = name.trim()
-        if (trimmedName === query) return // same query: the effect won't rerun, so loading would never end
+        if (trimmedName === query && page === 1) return // same query: the effect won't rerun, so loading would never end
         setLoading(true)
         setQuery(trimmedName)
+        setPage(1) //    a new search starts at page 1
+    }
+
+    function handlePageChange(newPage: number) {
+        setLoading(true)
+        setPage(newPage)
     }
 
     return (
@@ -71,6 +80,13 @@ export default function SearchPage() {
                             ))}
                         </tbody>
                     </table>
+
+                    <Paginator
+                        page={result.page}
+                        pageSize={result.pageSize}
+                        totalCount={result.totalCount}
+                        onPageChange={handlePageChange}
+                    />
                 </>
             )}
         </>
