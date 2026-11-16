@@ -24,6 +24,18 @@ export class ApiError extends Error {
     }
 }
 
+export type RoleDto = {
+    roleType: string
+    roleName: string
+    personName: string | null
+    birthYear: number | null
+    unitOrgnr: string | null
+    unitName: string | null
+    resigned: boolean
+}
+
+//====================================================
+
 // Every API call goes through here: the one place that knows about the token.
 async function apiFetch<T>(url: string): Promise<T> {
     const session = loadSession()
@@ -41,4 +53,8 @@ export function searchCompanies(name: string, page = 1, pageSize = 20) {
 
 export function getCompany(orgnr: string) {
     return apiFetch<CompanyDto>(`/api/companies/${encodeURIComponent(orgnr)}`)
+}
+
+export function getRoles(orgnr: string) {
+    return apiFetch<RoleDto[]>(`/api/companies/${encodeURIComponent(orgnr)}/roles`)
 }

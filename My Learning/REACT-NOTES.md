@@ -19,7 +19,7 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 | 4 | Search form with loading and error states | ✅ |
 | 5 | Paging, with a component and props | ✅ |
 | 6 | Router and the company page (400/404) | ✅ |
-| 7 | Roles on the company page | ⏳ |
+| 7 | Roles on the company page (and the company page public, like the API) | ✅ |
 | 8 | Search kept in the URL | ⏳ |
 | 9 | Layout route (header, footer, `<Outlet />`) | ⏳ |
 | 10 | Auth context, route guard, username and Log out in the header | ⏳ |
@@ -381,6 +381,80 @@ export function errorMessage(e: unknown, orgnr: string): string {
 1. **Why does 400 vs 404 matter?** 400 = your input is wrong (not 9 digits, or it fails MOD11): fix what you typed. 404 = the input is fine but no such company exists in our data. Different causes, different messages.
 2. **Why is `errorMessage` outside the component?** It uses no state, props or hooks, so it doesn't need to live inside. Outside, it's created once instead of on every render, it's a pure function you can unit test alone, and the component stays short.
 
+### RoleList.tsx and a public company page (best version: Part 3, step 7)
+
+```ts
+// api.ts: the type mirrors the C# RoleDto record
+export type RoleDto = {
+    roleType: string
+    roleName: string
+    personName: string | null // a person holds the role...
+    birthYear: number | null
+    unitOrgnr: string | null // ...or a unit (an auditing or accounting firm)
+    unitName: string | null
+    resigned: boolean
+}
+export function getRoles(orgnr: string) {
+    return apiFetch<RoleDto[]>(`/api/companies/${encodeURIComponent(orgnr)}/roles`) // leading / !
+}
+```
+
+```tsx
+// components/RoleList.tsx: its own fetch, loading and error
+export default function RoleList({ orgnr }: { orgnr: string }) {
+    const [roles, setRoles] = useState<RoleDto[] | null>(null)
+    const [error, setError] = useState<string | null>(null)
+    const [loading, setLoading] = useState(true)
+
+    useEffect(() => {
+        getRoles(orgnr)
+            .then((data) => setRoles(data))
+            .catch((e) => setError(errorMessage(e, orgnr)))
+            .finally(() => setLoading(false))
+    }, [orgnr])
+
+    // hooks first, then early returns
+    if (loading) return <p className="loading">Loading roles...</p>
+    if (error) return <p role="alert">{error}</p>
+    if (!roles || roles.length === 0) return <p>No roles registered.</p>
+
+    return (/* heading + rows: roles.map((r, i) => <div key={i}>…{r.personName ?? r.unitName}…) */)
+}
+```
+
+The company page is **public**, like the API (`GET /api/companies/{orgnr}` is `[AllowAnonymous]`); roles need a login:
+
+```tsx
+// App.tsx: no early return; the routes always render, only "/" depends on the session
+const [session, setSession] = useState(loadSession)
+...
+{session ? (<>Logged in as {session.username} … Log out</>) : (<p>Anonymous user. <Link to="/">Login here</Link></p>)}
+<Routes>
+    <Route path="/" element={session ? <SearchPage /> : <LoginPage onLogin={setSession} />} />
+    <Route path="/companies/:orgnr" element={<CompanyPage loggedIn={session !== null} />} />
+    <Route path="*" element={<NotFoundPage />} />
+</Routes>
+
+// CompanyPage.tsx
+export default function CompanyPage({ loggedIn }: { loggedIn: boolean }) {
+...
+{loggedIn ? <RoleList orgnr={company.orgnr} /> : <Link to="/">Login to see the roles</Link>}
+```
+
+- **Hiding in the frontend is UX; the API's 401 is the security.** Anyone can call the endpoint without the UI.
+- **Early return vs `&&`:** early returns when the states replace the **whole** output (RoleList: loading OR error OR empty OR list); `{cond && …}` when part of the page stays (CompanyPage keeps "← Back" in every state). Rule: **all hooks first**, then returns. React counts hooks by call order; a return above a hook skips it on some renders and React throws.
+- **Narrowing:** after `if (!session) return …`, TS knows `session` isn't null below. Remove the return and `session.username` fails with "possibly null"; `{session && …}` or `session ? … : …` narrows for that block only. C#: flow analysis after `if (x is null) return;`.
+- **When `ignore` matters:** when a prop changes while the component stays mounted and an older response can arrive last. RoleList lives inside one company page and Back unmounts it, so it's left out. It would matter if a unit linked to its company (`/companies/A` → `/companies/B` keeps the same RoleList mounted).
+- **Logging in from a company page** lands on the search, not back on the company. A route guard that remembers "where you came from" fixes it (step 10).
+
+#### Questions and answers
+
+1. **Why is RoleList a separate component with its own fetch?** Each one loads and fails on its own. The company endpoint is anonymous but roles need a token, so a 401/403 on roles shouldn't hide the company details; and the details show without waiting for the roles.
+2. **Why is it rendered only after the company loaded?** On a 400 or 404 there's no company, so a roles request would fail with the same error and show it twice. It runs only once the orgnr is known to be valid and to exist.
+3. **`r.personName ?? r.unitName`: why can either be null?** A role is held by a person (name, birth year) or a unit, like an auditing or accounting firm (orgnr, name). Exactly one side is filled. The API sorts units last.
+4. **Roles have no id: is `key={i}` OK?** The key tells React which item is which between renders. An index is fine when the list is only replaced as a whole: never reordered, filtered or inserted into, and rows have no state of their own. It's a bug when you sort or delete with state in the rows (a checkbox): the state sticks to the position, not the item. A combined key `` `${r.roleType}-${r.personName ?? r.unitOrgnr}-${r.birthYear}` `` is better (use the side that exists, or units collide as `REVI-null-null`), but the same person can hold the same role twice (resigned + current). The proper fix is an id from the API.
+5. **Which errors can a roles request really show?** Not 400/404: RoleList renders only after the company loaded. The realistic ones are 401 (token expired) and 403 (no `companies.read`), which fall through to "Loading Failed (…)", and network errors. Step 11 handles the 401.
+
 ---
 
 ## 4. Vue to React
@@ -437,6 +511,9 @@ Rule: every value from the component that the effect *uses* goes in the list. ES
 | (Part 3) `e.status === 401` for the "No company" text: a missing company showed "Loading Failed (404)" | tsc can't catch it (any number is a `number`); only testing the 404 URL against the running API shows it. The endpoint is `[AllowAnonymous]`, so 401 can't even happen there |
 | (Part 3) `ApiError` left in CompanyPage's import after moving `errorMessage` to helpers.ts: tsc TS6133 | Moving code moves its imports too: the import goes where the code that uses it went |
 | (Part 3) `className="d-flex"` | A Bootstrap class name; without Bootstrap (or my own CSS rule) it does nothing |
+| (Part 3) `apiFetch(\`api/companies/…/roles\`)` without the leading `/`: "Could not reach the server" | A relative URL: on `/companies/923609016` it became `/companies/api/…`, not proxied. Vite answered `index.html` with **200**, `response.json()` failed on HTML, and that error isn't an `ApiError`. The message lied about the cause |
+| (Part 3) `bithYear` in `RoleDto`: "Born" always empty | The TS type is **my claim** about the JSON; nothing checks it at runtime, so a misspelled field is just `undefined`. Same as a misnamed C# DTO property (default value). Runtime validation: Zod |
+| (Part 3) The old `if (!session) return <LoginPage/>` left in App: every URL showed the login | An early return above `<Routes>` means the routes never render. Removing it made tsc say `session` is "possibly null" → narrow with `session ? … : …` |
 
 ---
 

@@ -238,10 +238,31 @@ button.login {
     border: 0px #ccc solid;
     padding: 5px;
 }
-
+/***************/
+.details {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    margin-left: auto;
+    margin-right: auto;
+}
+.details div {
+    display: flex;
+    text-align: left;
+    gap: 20px;
+}
+.w-50 {
+    width: 50%;
+}
+.m-auto {
+    margin: auto;
+}
 .logout {
     padding: 10px;
     margin: 10px;
+}
+.text-start {
+    text-align: left;
 }
 header {
     position: relative;
