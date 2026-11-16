@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router'
+import { Link, useLocation, useParams } from 'react-router'
 import { type CompanyDto, getCompany } from '../api'
 import { errorMessage } from '../helpers'
 import RoleList from '../components/RoleList'
@@ -9,6 +9,8 @@ export default function CompanyPage({ loggedIn }: { loggedIn: boolean }) {
     const [company, setCompany] = useState<CompanyDto | null>(null)
     const [error, setError] = useState<string | null>(null)
     const [loading, setLoading] = useState(true)
+
+    const backUrl = useLocation().state?.backUrl ?? '/'
 
     useEffect(() => {
         let ignore = false
@@ -29,7 +31,7 @@ export default function CompanyPage({ loggedIn }: { loggedIn: boolean }) {
 
     return (
         <>
-            <Link to="/" className="btn">
+            <Link to={backUrl} className="btn">
                 ← Back to search
             </Link>
 

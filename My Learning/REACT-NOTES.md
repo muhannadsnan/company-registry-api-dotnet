@@ -20,7 +20,7 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 | 5 | Paging, with a component and props | ✅ |
 | 6 | Router and the company page (400/404) | ✅ |
 | 7 | Roles on the company page (and the company page public, like the API) | ✅ |
-| 8 | Search kept in the URL | ⏳ |
+| 8 | Search kept in the URL | ✅ |
 | 9 | Layout route (header, footer, `<Outlet />`) | ⏳ |
 | 10 | Auth context, route guard, username and Log out in the header | ⏳ |
 | 11 | Token expiry: automatic logout, and a 401 sends you to the login page | ⏳ |
@@ -514,6 +514,8 @@ Rule: every value from the component that the effect *uses* goes in the list. ES
 | (Part 3) `apiFetch(\`api/companies/…/roles\`)` without the leading `/`: "Could not reach the server" | A relative URL: on `/companies/923609016` it became `/companies/api/…`, not proxied. Vite answered `index.html` with **200**, `response.json()` failed on HTML, and that error isn't an `ApiError`. The message lied about the cause |
 | (Part 3) `bithYear` in `RoleDto`: "Born" always empty | The TS type is **my claim** about the JSON; nothing checks it at runtime, so a misspelled field is just `undefined`. Same as a misnamed C# DTO property (default value). Runtime validation: Zod |
 | (Part 3) The old `if (!session) return <LoginPage/>` left in App: every URL showed the login | An early return above `<Routes>` means the routes never render. Removing it made tsc say `session` is "possibly null" → narrow with `session ? … : …` |
+| (Part 3) `setSearchParams({ ...searchParams, page })`: Next on "fjord" gave `/?page=2` (all companies) | Spread copies own properties; `URLSearchParams` has none, so `name` was dropped. Copy with `new URLSearchParams(searchParams)`, then `set` |
+| (Part 3) `useState('')` for the input after moving the search to the URL | After a refresh the table showed fjord but the input was empty: start it with `useState(query)` |
 
 ---
 
@@ -635,25 +637,55 @@ Paginator:   onClick={() => onPageChange(page + 1)}   calls it with 4 → runs h
 3. **What if `page` is missing from the deps `[query, page]`?** The effect only reruns on query changes. Clicking Next changes page and shows "Loading...", but no fetch happens, so the table never updates. ESLint's `exhaustive-deps` warns about it.
 4. **Why disable the buttons at the ends? What does the API answer for `page=0`?** There's no data there. The API has `[Range(1, 1000)]` on Page, so page=0 gives **400 Bad Request**. Disabling is a UX guard; the API validation is the real one.
 
-### State in the URL: `SearchPage.tsx`
+### State in the URL: `SearchPage.tsx` (best version: Part 3, step 8)
 
 ```tsx
 const [searchParams, setSearchParams] = useSearchParams()
-const query = searchParams.get('name') ?? ''
-const page = Number(searchParams.get('page')) || 1      // missing or "abc" → 1
+const query = searchParams.get('name') ?? '' // was useState
+const page = Number(searchParams.get('page')) || 1 // missing, "abc" (NaN) or 0 → 1
+const [name, setName] = useState(query) // the input starts with the URL's search
+
+// useEffect: unchanged, still [query, page]; they just come from the URL now
+
+function handleSubmit(e: SubmitEvent<HTMLFormElement>) {
+    e.preventDefault()
+    const trimmedName = name.trim()
+    if (trimmedName === query && page === 1) return
+    setLoading(true)
+    setSearchParams(trimmedName ? { name: trimmedName } : {}) // no page param = page 1
+}
 
 function handlePageChange(newPage: number) {
-    const params = new URLSearchParams(searchParams)     // copy, so `name` stays
+    setLoading(true)
+    const params = new URLSearchParams(searchParams) // a copy, so name stays
     params.set('page', String(newPage))
-    setSearchParams(params)                               // = router.push({ query })
+    setSearchParams(params) // = Vue's router.push({ query })
 }
+
+// a row: the sender builds the back URL and passes it invisibly
+<Link to={`/companies/${c.orgnr}`} state={{ backUrl: `/?${searchParams}` }} key={c.orgnr}>
 ```
 
-- `query` and `page` are **read from the URL** on every render; the URL is the only place they live.
-- Changing the URL re-renders, the effect sees `[query, page]` change, and fetches. The effect itself
-  didn't change when I moved the state.
-- `<Link to=… state={{ search: searchParams.toString() }}>` carries the search to the company page
-  invisibly, so "← Back to search" returns to it.
+```tsx
+// CompanyPage.tsx: the receiver uses it, with a fallback
+const backUrl = useLocation().state?.backUrl ?? '/'
+<Link to={backUrl} className="btn">← Back to search</Link>
+```
+
+- **Spread** `{ ...a, page: '2' }` copies an object's own properties (PHP `[...$a, 'page' => '2']`). It works on plain objects, but `URLSearchParams` keeps its entries hidden inside, so `{ ...searchParams }` is `{}`. Use its methods: `new URLSearchParams(copy)`, `get`, `set`, `toString`.
+- **`location.state` is typed `any`**, so `state?.backUrl` needs no cast, but nothing is checked either (a typo is just `undefined`, like `bithYear`).
+- **`state` vs the URL:** state is stored in the browser's history entry, invisible; the company URL stays clean. A link opened directly has no state → fallback `/`.
+- **`navigate(-1)`** (`useNavigate`) = the browser's Back button: natural when you came from the search, but a directly opened link leaves the app or does nothing.
+- **Hooks only in components or other hooks**, so a helper that calls `useLocation()` must be a **custom hook**: a function named `use…` (`useBackUrl()` in `src/hooks/`). React's way to reuse logic with hooks; Vue's composables.
+- **Known gap:** search fjord, then bank, then the **browser** Back: the results follow the URL, but the input still says "bank" (`useState(query)` only runs on the first render) and "Loading..." doesn't show (no handler ran).
+
+#### Questions and answers
+
+1. **Where do `query` and `page` live, and why is `name` still a useState?** They're read from the URL on every render; the URL is the only place they live. `name` is what you're typing: it shouldn't change the URL on every keystroke, only on submit.
+2. **Why did refresh, Back and a shared link lose the search before?** It was useState: memory that dies on a refresh or unmount, and a link only had the path. The URL is kept in history, reloaded and shared by the browser.
+3. **`Number(searchParams.get('page')) || 1` for `abc`, `0`, missing, `5000`?** `Number('abc')` is NaN and `Number('0')` is 0, both falsy, so 1; missing is `Number(null)` = 0, so 1 (the URL keeps the wrong value, the results are page 1). `5000` passes the frontend; the API's `[Range(1, 1000)]` gives 400, "Search failed (400)".
+4. **Why `new URLSearchParams(searchParams)` and not `{ ...searchParams, page }`?** Spread copies only own properties and URLSearchParams has none, so `name` is dropped (Next on "fjord" gave `/?page=2`, all companies). The copy constructor copies every entry; `set` changes only page.
+5. **`state` on the Link vs the search in the company URL?** State is invisible and lives in the history entry; the URL stays clean. A directly opened link has no state, so Back goes to `/`. In the URL (`?from=…`) it would survive sharing, but it's ugly and every page must pass it on.
 
 ### An effect with cleanup: polling on `ImportsPage.tsx`
 

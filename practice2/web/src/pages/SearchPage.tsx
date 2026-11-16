@@ -1,16 +1,17 @@
 import { useEffect, useState, type SubmitEvent } from 'react'
 import { ApiError, searchCompanies, type CompanyDto, type PageResult } from '../api'
 import Paginator from '../components/Paginator'
-import { Link } from 'react-router'
+import { Link, useSearchParams } from 'react-router'
 
 export default function SearchPage() {
-    const [name, setName] = useState('') // what's in the input
-    const [query, setQuery] = useState('') // what was searched
+    const [searchParams, setSearchParams] = useSearchParams()
+    const query = searchParams.get('name') ?? ''
+    const page = Number(searchParams.get('page')) || 1 // was useState; missing, "abc" or 0 → 1
+
+    const [name, setName] = useState(query) // what's in the input
     const [result, setResult] = useState<PageResult<CompanyDto> | null>(null)
     const [error, setError] = useState<string | null>(null)
     const [loading, setLoading] = useState(true) // true: the first search starts right away
-
-    const [page, setPage] = useState(1)
 
     useEffect(() => {
         let ignore = false // set when this search is outdated
@@ -40,13 +41,14 @@ export default function SearchPage() {
         const trimmedName = name.trim()
         if (trimmedName === query && page === 1) return // same query: the effect won't rerun, so loading would never end
         setLoading(true)
-        setQuery(trimmedName)
-        setPage(1) //    a new search starts at page 1
+        setSearchParams(trimmedName ? { name: trimmedName } : {}) // no page param = page 1
     }
 
     function handlePageChange(newPage: number) {
         setLoading(true)
-        setPage(newPage)
+        const params = new URLSearchParams(searchParams) // a copy, so name stays
+        params.set('page', String(newPage))
+        setSearchParams(params)
     }
 
     return (
@@ -74,7 +76,11 @@ export default function SearchPage() {
                                 <strong>Registered</strong>
                             </div>
                             {result.items.map((c) => (
-                                <Link to={`/companies/${c.orgnr}`} key={c.orgnr}>
+                                <Link
+                                    to={`/companies/${c.orgnr}`}
+                                    state={{ backUrl: `/?${searchParams}` }}
+                                    key={c.orgnr}
+                                >
                                     <div className="item">
                                         <span>{c.orgnr}</span>
                                         <span className="name">{c.name}</span>
