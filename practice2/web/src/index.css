@@ -59,12 +59,15 @@
 }
 
 body {
-    margin: 0;
+    margin: auto;
 }
 main {
     width: 600px;
     min-height: 500px;
-    margin: 0 auto;
+    margin: auto;
+}
+a {
+    text-decoration: none;
 }
 
 h1,
@@ -95,7 +98,10 @@ h2 {
 p {
     margin: 0;
 }
-
+nav .active {
+    font-weight: bold;
+    border-bottom: 2px solid #ccc;
+}
 .error {
     color: red;
     padding: 10px;
@@ -157,6 +163,7 @@ p {
     border: 1px #34263f solid;
     border-bottom: 0;
     border-radius: 0;
+    margin: auto;
 }
 .results .item {
     display: flex;
@@ -259,20 +266,32 @@ button.login {
 }
 .logout {
     padding: 10px;
-    margin: 10px;
+    margin-left: 10px;
 }
 .text-start {
     text-align: left;
+}
+.text-center {
+    text-align: center !important;
+}
+.border-bottom {
+    border-bottom: 1px solid #ccc;
+}
+.d-flex {
+    display: flex;
+}
+.justify-content-around {
+    justify-content: space-around;
 }
 header {
     position: relative;
     top: 0;
     padding: 20px 0;
-    margin-bottom: 20px;
+    margin-bottom: 10px;
     display: flex;
     flex-direction: column;
     justify-content: center;
-    height: 50px;
+    height: 80px;
     width: 100%;
     background: #1c1422;
     border-bottom: 1px #352442 solid;

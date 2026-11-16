@@ -21,7 +21,7 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 | 6 | Router and the company page (400/404) | ✅ |
 | 7 | Roles on the company page (and the company page public, like the API) | ✅ |
 | 8 | Search kept in the URL | ✅ |
-| 9 | Layout route (header, footer, `<Outlet />`) | ⏳ |
+| 9 | Layout route (header, footer, `<Outlet />`) | ✅ |
 | 10 | Auth context, route guard, username and Log out in the header | ⏳ |
 | 11 | Token expiry: automatic logout, and a 401 sends you to the login page | ⏳ |
 | 12 | Import page with polling (link only for users with `companies.import`) | ⏳ |
@@ -516,6 +516,7 @@ Rule: every value from the component that the effect *uses* goes in the list. ES
 | (Part 3) The old `if (!session) return <LoginPage/>` left in App: every URL showed the login | An early return above `<Routes>` means the routes never render. Removing it made tsc say `session` is "possibly null" → narrow with `session ? … : …` |
 | (Part 3) `setSearchParams({ ...searchParams, page })`: Next on "fjord" gave `/?page=2` (all companies) | Spread copies own properties; `URLSearchParams` has none, so `name` was dropped. Copy with `new URLSearchParams(searchParams)`, then `set` |
 | (Part 3) `useState('')` for the input after moving the search to the URL | After a refresh the table showed fjord but the input was empty: start it with `useState(query)` |
+| (Part 3) Moved the search to `/search` (HomePage at `/`), but `backUrl` and the logged-out "Log in" still pointed at `/` | Moving a route means searching for every link to it (`grep -rn 'to="/"'` and `backUrl`): tsc can't know a path string is wrong |
 
 ---
 
@@ -709,24 +710,59 @@ useEffect(() => {
   in development exists to expose exactly this.
 - This is the client half of the API's **202 Accepted** pattern: "accepted, here's the run id, poll it".
 
-### Layout route and nested routes: `App.tsx`
+### Layout route and nested routes: `Layout.tsx` + `App.tsx` (best version: Part 3, step 9)
 
 ```tsx
+// Layout.tsx: header and footer drawn once; pages render at <Outlet />
+export default function Layout({ session, onLogout }: { session: Session | null; onLogout: () => void }) {
+    return (
+        <>
+            <header>
+                <strong>Practice 2</strong>
+                {session ? (
+                    <nav>
+                        <NavLink to="/">Home</NavLink> | <NavLink to="/search">Search</NavLink>
+                        <span>Welcome, {session.username}</span>
+                        <button className="logout" onClick={onLogout}>Log out</button>
+                    </nav>
+                ) : (
+                    <nav>Anonymous user, <NavLink to="/search">Log in</NavLink></nav>
+                )}
+            </header>
+            <main>
+                <Outlet /> {/* the matching child route renders here */}
+            </main>
+            <footer><p>Public data from Brønnøysundregistrene</p></footer>
+        </>
+    )
+}
+```
+
+```tsx
+// App.tsx
+const [session, setSession] = useState(loadSession)
+function handleLogout() { clearSession(); setSession(null) }
+
 <Routes>
-    <Route element={<Layout />}>                         {/* draws header/footer + <Outlet /> */}
-        <Route path="/login" element={<LoginPage />} />
-        <Route element={<RequireAuth />}>                {/* the guard: <Outlet /> or redirect */}
-            <Route path="/" element={<SearchPage />} />
-            <Route path="/companies/:orgnr" element={<CompanyPage />} />
-            <Route path="/import" element={<ImportsPage />} />
-        </Route>
-        <Route path="*" element={<p>Page not found.</p>} />
+    <Route element={<Layout session={session} onLogout={handleLogout} />}>   {/* no path: a wrapper */}
+        <Route path="/" element={<HomePage />} />
+        <Route path="/search" element={session ? <SearchPage /> : <LoginPage onLogin={setSession} />} />
+        <Route path="/companies/:orgnr" element={<CompanyPage loggedIn={session !== null} />} />
+        <Route path="*" element={<NotFoundPage />} />
     </Route>
 </Routes>
 ```
 
-- A `<Route>` **without a path** matches no URL itself; it wraps the routes inside it.
-- The layout stays mounted while pages change, so its state survives navigation.
+- Part 3 moved the search from `/` to `/search` and added a HomePage at `/`; every link to the search (`backUrl`, "Log in", "Login to see the roles") follows.
+- `NavLink to="/"` is a special case: active only on exactly `/`, not on every URL.
+
+#### Questions and answers
+
+1. **The outer `<Route>` has no `path`: what does it do?** It matches no URL itself; it wraps its child routes, and whichever child matches renders inside its element's `<Outlet />`. For a shared layout (or a guard), not navigation.
+2. **What renders at `<Outlet />`, and the equivalents?** The matching child route (CompanyPage on `/companies/…`). Vue Router `<router-view />`; Nuxt `<slot />` in `layouts/default.vue` (or `<NuxtPage />`); Razor `@RenderBody()` in `_Layout.cshtml`.
+3. **Is Layout re-created when you go from search to a company?** No: it stays **mounted** while you move between its child routes; only the Outlet part swaps. It unmounts only on a route outside it. So the header's state survives (an open menu, a search box), its data isn't fetched again, and nothing flickers.
+4. **`NavLink` vs `Link`?** NavLink knows if it's **active**: when its `to` matches the URL it adds `class="active"` and `aria-current="page"`, to highlight the current menu item. Vue: `router-link-active`.
+5. **Five components deep need the session: the problem?** **Prop drilling**: every component in between must accept and pass on props it doesn't use, and each new consumer changes the whole chain. Fix: a **context**, provided once at the top and read anywhere with `useContext` (Vue's provide/inject). Step 10.
 
 ### Login: `src/auth/`
 

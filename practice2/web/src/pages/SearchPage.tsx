@@ -71,14 +71,14 @@ export default function SearchPage() {
                         <div className="results">
                             <div className="item bg-dark">
                                 <strong>Orgnr</strong>
-                                <strong className="name">Name</strong>
+                                <strong className="name text-center">Name</strong>
                                 <strong>Form</strong>
                                 <strong>Registered</strong>
                             </div>
                             {result.items.map((c) => (
                                 <Link
                                     to={`/companies/${c.orgnr}`}
-                                    state={{ backUrl: `/?${searchParams}` }}
+                                    state={{ backUrl: `/search?${searchParams}` }}
                                     key={c.orgnr}
                                 >
                                     <div className="item">

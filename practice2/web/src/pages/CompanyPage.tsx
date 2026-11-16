@@ -10,7 +10,7 @@ export default function CompanyPage({ loggedIn }: { loggedIn: boolean }) {
     const [error, setError] = useState<string | null>(null)
     const [loading, setLoading] = useState(true)
 
-    const backUrl = useLocation().state?.backUrl ?? '/'
+    const backUrl = useLocation().state?.backUrl ?? '/search'
 
     useEffect(() => {
         let ignore = false
@@ -31,9 +31,11 @@ export default function CompanyPage({ loggedIn }: { loggedIn: boolean }) {
 
     return (
         <>
-            <Link to={backUrl} className="btn">
-                ← Back to search
-            </Link>
+            <div className="d-flex">
+                <Link to={backUrl} className="btn">
+                    ← Back to search
+                </Link>
+            </div>
 
             {loading && <p className="loading">Loading...</p>}
             {!loading && error && <p role="alert">{error}</p>}
@@ -55,7 +57,7 @@ export default function CompanyPage({ loggedIn }: { loggedIn: boolean }) {
                         </div>
                     </div>
                     {/* Roles */}
-                    {loggedIn ? <RoleList orgnr={company.orgnr} /> : <Link to="/">Login to see the roles</Link>}
+                    {loggedIn ? <RoleList orgnr={company.orgnr} /> : <Link to="/search">Login to see the roles</Link>}
                 </>
             )}
         </>
