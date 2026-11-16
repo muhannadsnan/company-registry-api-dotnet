@@ -2,6 +2,9 @@ import { useState } from 'react'
 import LoginPage from './auth/LoginPage'
 import { clearSession, loadSession } from './auth/session'
 import SearchPage from './pages/SearchPage'
+import { Route, Routes } from 'react-router'
+import NotFoundPage from './pages/NotFoundPage'
+import CompanyPage from './pages/CompanyPage'
 
 function App() {
     const [session, setSession] = useState(loadSession) // runs once, on the first render
@@ -26,7 +29,11 @@ function App() {
 
             <hr />
 
-            <SearchPage />
+            <Routes>
+                <Route path="/" element={<SearchPage />} />
+                <Route path="/companies/:orgnr" element={<CompanyPage />} />
+                <Route path="*" element={<NotFoundPage />} />
+            </Routes>
         </>
     )
 }

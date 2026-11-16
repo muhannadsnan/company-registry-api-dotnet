@@ -1,6 +1,7 @@
 import { useEffect, useState, type SubmitEvent } from 'react'
 import { ApiError, searchCompanies, type CompanyDto, type PageResult } from '../api'
 import Paginator from '../components/Paginator'
+import { Link } from 'react-router'
 
 export default function SearchPage() {
     const [name, setName] = useState('') // what's in the input
@@ -50,45 +51,49 @@ export default function SearchPage() {
 
     return (
         <>
-            <form onSubmit={handleSubmit}>
-                <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Company name" />
-                <button type="submit">Search</button>
-            </form>
-
-            {loading && <p className="loading">Loading...</p>}
-            {!loading && error && <p role="alert">{error}</p>}
-            {!loading && result && (
-                <>
-                    <p>{result.totalCount} companies</p>
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Orgnr</th>
-                                <th>Name</th>
-                                <th>Form</th>
-                                <th>Registered</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {result.items.map((c) => (
-                                <tr key={c.orgnr}>
-                                    <td>{c.orgnr}</td>
-                                    <td>{c.name}</td>
-                                    <td>{c.orgForm}</td>
-                                    <td>{c.registrationDate ?? '_'}</td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-
-                    <Paginator
-                        page={result.page}
-                        pageSize={result.pageSize}
-                        totalCount={result.totalCount}
-                        onPageChange={handlePageChange}
+            <div id="searchPage">
+                <form onSubmit={handleSubmit}>
+                    <input
+                        type="text"
+                        value={name}
+                        onChange={(e) => setName(e.target.value)}
+                        placeholder="Company name"
                     />
-                </>
-            )}
+                    <button type="submit">Search</button>
+                </form>
+                {loading && <p className="loading">Loading...</p>}
+                {!loading && error && <p role="alert">{error}</p>}
+                {!loading && result && (
+                    <>
+                        <p className="totalCount">{result.totalCount} companies</p>
+                        <div className="results">
+                            <div className="item bg-dark">
+                                <strong>Orgnr</strong>
+                                <strong className="name">Name</strong>
+                                <strong>Form</strong>
+                                <strong>Registered</strong>
+                            </div>
+                            {result.items.map((c) => (
+                                <Link to={`/companies/${c.orgnr}`} key={c.orgnr}>
+                                    <div className="item">
+                                        <span>{c.orgnr}</span>
+                                        <span className="name">{c.name}</span>
+                                        <span>{c.orgForm}</span>
+                                        <span>{c.registrationDate ?? '_'}</span>
+                                    </div>
+                                </Link>
+                            ))}
+                        </div>
+
+                        <Paginator
+                            page={result.page}
+                            pageSize={result.pageSize}
+                            totalCount={result.totalCount}
+                            onPageChange={handlePageChange}
+                        />
+                    </>
+                )}
+            </div>
         </>
     )
 }

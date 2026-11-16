@@ -135,9 +135,22 @@ p {
     border-left: 1px #ccc solid;
     color: #77916c;
 }
+.btn {
+    padding: 14px 11px;
+    border-radius: 5px;
+    background: #203517;
+    cursor: pointer;
+    color: #77916c;
+    margin: 10px;
+    text-decoration: none;
+}
 
 .bg-loading {
     background: #555 !important;
+}
+
+.bg-dark {
+    background: #111 !important;
 }
 
 .results {
@@ -156,6 +169,10 @@ p {
 }
 .results .item:hover {
     background-color: #18151e;
+}
+.results .item .name {
+    width: 300px;
+    text-align: left;
 }
 .results.loading {
     display: none;

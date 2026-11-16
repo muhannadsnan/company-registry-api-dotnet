@@ -7,7 +7,7 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 - **Part 2 (29 Oct – 1 Nov 2026):** `practice/web/`, a second frontend for my practice API, built in 11
   steps: paging, URL state, a layout, an import page that polls, and a login with route guards.
   Stack: Vite 8 · React 19.3 · TypeScript 7 · react-router · Oxlint · Prettier.
-- **Part 3 (from 14 Nov 2026):** `practice2/web/`, the frontend for the practice2 API (port 5020), in 12
+- **Part 3 (from 14 Nov 2026):** `practice2/web/`, the frontend for the practice2 API (port 5020), in 13
   steps. Stack: Vite 8 · React 19.3 · TypeScript 6 · ESLint · Prettier. Its steps are **merged into the
   matching sections below**: one direct answer per topic, not a second version.
 
@@ -18,13 +18,14 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 | 3 | `apiFetch` sends the token, and a typed API client | ✅ |
 | 4 | Search form with loading and error states | ✅ |
 | 5 | Paging, with a component and props | ✅ |
-| 6 | Router and the company page (400/404) | ⏳ |
+| 6 | Router and the company page (400/404) | ✅ |
 | 7 | Roles on the company page | ⏳ |
 | 8 | Search kept in the URL | ⏳ |
 | 9 | Layout route (header, footer, `<Outlet />`) | ⏳ |
 | 10 | Auth context, route guard, username and Log out in the header | ⏳ |
 | 11 | Token expiry: automatic logout, and a 401 sends you to the login page | ⏳ |
 | 12 | Import page with polling (link only for users with `companies.import`) | ⏳ |
+| 13 | Tailwind: setup, then basic styling per element | ⏳ |
 
 # Part 1: `web/`
 
@@ -141,32 +142,40 @@ export default defineConfig({
 - One origin for the browser, so no CORS setup is needed. The same idea as Nginx `proxy_pass` or Nuxt `devProxy`.
 - Test: `http://localhost:5173/api/companies` gives **401** (it reached .NET, no token). That's the expected answer.
 
-### src/main.tsx: routing
+### Routing: `main.tsx` + `App.tsx` (best version: Part 3, step 6)
 
-```tsx
-import { StrictMode } from 'react'
-import { createRoot } from 'react-dom/client'
-import { BrowserRouter, Route, Routes } from 'react-router'
-import './index.css'
-import SearchPage from './page/SearchPage.tsx'
-import CompanyPage from './page/CompanyPage.tsx'
-
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <BrowserRouter>
-        <Routes>
-            <Route path="/" element={<SearchPage />} />
-            <Route path="/companies/:orgnr" element={<CompanyPage />} />
-        </Routes>
-    </BrowserRouter>
-  </StrictMode>,
-)
+```bash
+npm install react-router@8.5.1   # v7+ merged react-router-dom into react-router
 ```
 
-- `<BrowserRouter>` follows the browser URL. `<Routes>` picks the first `<Route>` that matches.
+```tsx
+// main.tsx: the router wraps the whole app
+<StrictMode>
+    <BrowserRouter>
+        <App />
+    </BrowserRouter>
+</StrictMode>
+
+// App.tsx: after the login check
+<Routes>
+    <Route path="/" element={<SearchPage />} />
+    <Route path="/companies/:orgnr" element={<CompanyPage />} />
+    <Route path="*" element={<NotFoundPage />} />
+</Routes>
+
+// SearchPage.tsx: a row links to the company page
+<Link to={`/companies/${c.orgnr}`} key={c.orgnr}>...</Link>
+```
+
+- `<BrowserRouter>` follows the browser URL. `<Routes>` renders the `<Route>` that matches; `*` catches the rest.
 - `:orgnr` is a URL parameter, like Nuxt's `pages/companies/[orgnr].vue`.
-- `!` after `getElementById('root')` tells TypeScript "this is not null".
-- `<StrictMode>` adds extra checks in development only.
+- `!` after `getElementById('root')` tells TypeScript "this is not null". `<StrictMode>` adds extra checks in development only.
+
+#### Questions and answers
+
+1. **Why `<Link to>` and not `<a href>`?** `<Link>` stops the browser's normal navigation, changes the URL with the History API, and React Router renders the matching `<Route>`: no server request. `<a href>` does a full page load: index.html and the JS download again and all React state is lost (the session survives only because it's in localStorage).
+2. **`/companies/:orgnr` vs `/api/companies/:orgnr`?** The first is the address bar: Vite's dev server answers with `index.html` (that's why a refresh works), then React Router picks the component. The second is `fetch`: Vite's proxy forwards it to the .NET API on 5020, which answers with JSON. In production a reverse proxy or ASP.NET's static files play Vite's role.
+3. **Open a company, click Back to search: where did the search go?** When the route changes, SearchPage **unmounts** and its `useState` values are destroyed. Back mounts a fresh SearchPage with the initial values (empty query, page 1). Fix: keep the search in the URL (`?name=fjord&page=3`), step 8.
 
 ### src/api.ts: the typed API client (best version: Part 3, step 3)
 
@@ -304,64 +313,73 @@ export default function SearchPage() {
 - **`{cond && <p/>}`** = `v-if`. **`array.map(...)`** = `v-for`. **`key`** = `:key`.
 - **`type Company` in an import** is a type-only import; it disappears from the compiled JavaScript.
 
-### src/page/CompanyPage.tsx: URL parameter + loading data
+### CompanyPage.tsx: URL parameter, 400 vs 404 (best version: Part 3, step 6)
 
 ```tsx
-import {Link, useParams} from 'react-router'
 import { useEffect, useState } from 'react'
-import { getCompany, type Company } from '../api'
+import { Link, useParams } from 'react-router'
+import { type CompanyDto, getCompany } from '../api'
+import { errorMessage } from '../helpers'
 
 export default function CompanyPage() {
-    const {orgnr} = useParams()
-    const [company, setCompany] = useState<Company | null>(null)
+    const { orgnr = '' } = useParams() // from the URL /companies/:orgnr; '' if missing
+    const [company, setCompany] = useState<CompanyDto | null>(null)
     const [error, setError] = useState<string | null>(null)
+    const [loading, setLoading] = useState(true)
 
-    useEffect( () => {
-        if(!orgnr) return
+    useEffect(() => {
+        let ignore = false
         getCompany(orgnr)
-            .then(setCompany)
-            .catch( (e) => setError(e instanceof Error ? e.message : 'Something went wrong'))
+            .then((data) => { if (!ignore) setCompany(data) })
+            .catch((e) => { if (!ignore) setError(errorMessage(e, orgnr)) })
+            .finally(() => { if (!ignore) setLoading(false) })
+        return () => { ignore = true }
     }, [orgnr])
 
     return (
-        <main>
-            <Link to="/">← Back to search</Link>
-
-            {error && <p role="alert">{error}</p>}
-            {!company && !error && <p>Loading..</p>}
-
-            {company && (
+        <>
+            <Link to="/" className="btn">← Back to search</Link>
+            {loading && <p className="loading">Loading...</p>}
+            {!loading && error && <p role="alert">{error}</p>}
+            {!loading && company && (
                 <>
-                    <h1>{company.name}</h1>
-                    <dl>
-                        <dt>Orgnr</dt>
-                        <dd>{company.organisationNumber}</dd>
-                        <dt>Form</dt>
-                        <dd>{company.organisationFormCode}</dd>
-                        <dt>Adresse</dt>
-                        <dd>
-                            {company.address.street}, {company.address.postalCode}, {company.address.postalPlace}
-                        </dd>
-                        <dt>Kommune</dt>
-                        <dd>{company.address.municipality}</dd>
-                        <dt>Registered</dt>
-                        <dd>{company.registrationDate ?? 'Ukjent'}</dd>
-                    </dl>
+                    <h2>{company.name}</h2>
+                    <div><strong>Orgnr:</strong> <span>{company.orgnr}</span></div>
+                    <div><strong>Form:</strong> <span>{company.orgForm}</span></div>
+                    <div><strong>Registered:</strong> <span>{company.registrationDate ?? '_'}</span></div>
                 </>
             )}
-        </main>
+        </>
     )
 }
 ```
 
-- **`const { orgnr } = useParams()`** is destructuring: take `orgnr` out of the params object (`{ orgnr: "912855414" }`). PHP: `['orgnr' => $orgnr] = $params;`
-- **Hooks** are the functions starting with `use` (`useState`, `useEffect`, `useParams`). Call them at the top of the component, never inside `if` or loops.
-- **`useEffect(fn, [orgnr])`**: run after render, and again when `orgnr` changes. Fetching is a side effect, so it goes here, not in the component body.
-- **`.then(setCompany)`** passes the setter directly; the same as `.then(c => setCompany(c))`.
-- **`<> … </>`** is a fragment: groups elements without an extra `<div>`.
-- **`??`**: use the right side if the left is null or undefined (same as PHP).
-- **`<dl>/<dt>/<dd>`** is a semantic label/value list; good for screen readers.
-- To fix: one UI language ("Registered" should be "Registrert").
+`src/helpers.ts`:
+
+```ts
+import { ApiError } from './api'
+
+export function errorMessage(e: unknown, orgnr: string): string {
+    if (!(e instanceof ApiError)) return 'Could not reach the server'
+    if (e.status === 400) return `"${orgnr}" is not a valid organisation number`
+    if (e.status === 404) return `No company with orgnr ${orgnr}`
+    return `Loading Failed (${e.status})`
+}
+```
+
+- **`const { orgnr = '' } = useParams()`** is destructuring with a default. PHP: `['orgnr' => $orgnr] = $params;`
+- **Hooks** are the functions starting with `use`. Call them at the top of the component, never inside `if` or loops.
+- **`<> … </>`** is a fragment: groups elements without an extra `<div>`. **`??`**: the right side if the left is null or undefined (same as PHP).
+- The checks: `/companies/123` gives the 400 text; `/companies/123456785` passes MOD11 but doesn't exist, so the 404 text.
+
+**Helper files.** React has no fixed folder (Nuxt auto-imports `utils/`; React doesn't, you import). A few helpers: one `src/helpers.ts` with named exports, `import { a, b } from '../helpers'`. When it grows, split **by topic** (`utils/errors.ts`, `utils/dates.ts`), not one file per function. `import * as helpers` also works; Vite drops unused exports in production (tree-shaking) either way. Helpers go in **`.ts`** files: the `react-refresh` ESLint rule warns when a `.tsx` file exports a component *and* something else, because hot reload can only swap component-only files. A more general alternative: `errorMessage(e, { 400: '…', 404: '…' })` with `Partial<Record<number, string>>`, so every page passes its own texts.
+
+**Barrel files.** `import { SearchPage, CompanyPage } from './pages'` works with a `pages/index.ts` that re-exports (`export { default as SearchPage } from './SearchPage'`); braces because they're named exports. In apps I keep direct imports: a barrel is another file to maintain, can cause circular imports, and makes Vite's dev server load every page. Barrels suit libraries.
+
+#### Questions and answers
+
+1. **Why does 400 vs 404 matter?** 400 = your input is wrong (not 9 digits, or it fails MOD11): fix what you typed. 404 = the input is fine but no such company exists in our data. Different causes, different messages.
+2. **Why is `errorMessage` outside the component?** It uses no state, props or hooks, so it doesn't need to live inside. Outside, it's created once instead of on every render, it's a pure function you can unit test alone, and the component stays short.
 
 ---
 
@@ -416,6 +434,9 @@ Rule: every value from the component that the effect *uses* goes in the list. ES
 | (Part 3) `app.ts` for the API client | Name it `api.ts`: `app.ts` next to `App.tsx` invites import mix-ups (case-insensitive file systems) |
 | (Part 3) Search guard `if (trimmedName === query) return` without `&& page === 1` | On page 3, Search with the same text did nothing. The guard must check **every** state the submit changes (query and page) |
 | (Part 3) Quiz: "what if `page` is missing from the deps" answered as if it were there | Missing dep = the effect doesn't rerun when it changes: Next shows "Loading..." forever, no fetch |
+| (Part 3) `e.status === 401` for the "No company" text: a missing company showed "Loading Failed (404)" | tsc can't catch it (any number is a `number`); only testing the 404 URL against the running API shows it. The endpoint is `[AllowAnonymous]`, so 401 can't even happen there |
+| (Part 3) `ApiError` left in CompanyPage's import after moving `errorMessage` to helpers.ts: tsc TS6133 | Moving code moves its imports too: the import goes where the code that uses it went |
+| (Part 3) `className="d-flex"` | A Bootstrap class name; without Bootstrap (or my own CSS rule) it does nothing |
 
 ---
 
