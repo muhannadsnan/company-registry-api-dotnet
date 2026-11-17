@@ -22,10 +22,11 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 | 7 | Roles on the company page (and the company page public, like the API) | ✅ |
 | 8 | Search kept in the URL | ✅ |
 | 9 | Layout route (header, footer, `<Outlet />`) | ✅ |
-| 10 | Auth context, route guard, username and Log out in the header | ⏳ |
+| 10 | Auth context, route guard, username and Log out in the header | ✅ |
 | 11 | Token expiry: automatic logout, and a 401 sends you to the login page | ⏳ |
 | 12 | Import page with polling (link only for users with `companies.import`) | ⏳ |
 | 13 | Tailwind: setup, then basic styling per element | ⏳ |
+| 14 | (main project, not React) RabbitMQ: a first quick try; practice3 repeats it | ⏳ |
 
 # Part 1: `web/`
 
@@ -517,6 +518,8 @@ Rule: every value from the component that the effect *uses* goes in the list. ES
 | (Part 3) `setSearchParams({ ...searchParams, page })`: Next on "fjord" gave `/?page=2` (all companies) | Spread copies own properties; `URLSearchParams` has none, so `name` was dropped. Copy with `new URLSearchParams(searchParams)`, then `set` |
 | (Part 3) `useState('')` for the input after moving the search to the URL | After a refresh the table showed fjord but the input was empty: start it with `useState(query)` |
 | (Part 3) Moved the search to `/search` (HomePage at `/`), but `backUrl` and the logged-out "Log in" still pointed at `/` | Moving a route means searching for every link to it (`grep -rn 'to="/"'` and `backUrl`): tsc can't know a path string is wrong |
+| (Part 3) App kept its own `session` useState after the AuthProvider, and passed it to HomePage | A **second copy**: login changed the provider's session, App's stayed null, so HomePage said "click login" until a refresh. tsc flagged the leftover `handleLogout`. A context is one source of truth: read it with `useAuth()` |
+| (Part 3) `const session = await response.json()` inside LoginPage, which also has `session` from `useAuth()` | Works (the inner name hides the outer one) but reads wrong: name it `newSession` |
 
 ---
 
@@ -846,6 +849,70 @@ if (!session) return <LoginPage onLogin={setSession} />
   by the server (JS can't read it; needs CSRF protection), or a **BFF** (the token stays on a server).
   localStorage is the common SPA choice for a short-lived token (120 minutes here); React escapes text.
 - **The same message for both failures:** stops **user enumeration** (finding which usernames exist).
+
+**The auth context and the guard (best version: Part 3, step 10).** One source of truth for the session; no prop drilling:
+
+```ts
+// auth/AuthContext.ts (.ts: no component, so react-refresh is happy)
+export type AuthContextValue = { session: Session | null; login: (session: Session) => void; logout: () => void }
+export const AuthContext = createContext<AuthContextValue | null>(null)
+export function useAuth() {
+    const value = useContext(AuthContext)
+    if (!value) throw new Error('useAuth must be used inside <AuthProvider>')
+    return value
+}
+```
+
+```tsx
+// auth/AuthProvider.tsx: the session state moved here from App
+export default function AuthProvider({ children }: { children: ReactNode }) {
+    const [session, setSession] = useState(loadSession)
+    function login(newSession: Session) { saveSession(newSession); setSession(newSession) }
+    function logout() { clearSession(); setSession(null) }
+    return <AuthContext value={{ session, login, logout }}>{children}</AuthContext>
+}
+
+// auth/RequireAuth.tsx: the guard, a layout route without a path
+export default function RequireAuth() {
+    const { session } = useAuth()
+    const location = useLocation()
+    if (session) return <Outlet />
+    return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />
+}
+
+// main.tsx: <BrowserRouter><AuthProvider><App /></AuthProvider></BrowserRouter>
+
+// App.tsx: no state, no props, only routes
+<Route element={<Layout />}>
+    <Route path="/" element={<HomePage />} />
+    <Route path="/login" element={<LoginPage />} />
+    <Route path="/companies/:orgnr" element={<CompanyPage />} />
+    <Route element={<RequireAuth />}>
+        <Route path="/search" element={<SearchPage />} />
+    </Route>
+    <Route path="*" element={<NotFoundPage />} />
+</Route>
+
+// auth/LoginPage.tsx: no props; the re-render after login() does the redirect
+const { session, login } = useAuth()
+const from = useLocation().state?.from ?? '/search'
+// ...useStates...
+if (session) return <Navigate to={from} replace />   // after all hooks
+// in handleSubmit: const newSession: Session = await response.json(); login(newSession)
+
+// Layout, HomePage, CompanyPage: const { session } = useAuth()
+// CompanyPage: <Link to="/login" state={{ from: `/companies/${orgnr}` }}>Log in to see the roles</Link>
+```
+
+- **`replace` on a redirect.** Without it the redirect **adds** a history entry: `[home, /search, /login]`, and after login `[…, /login, /search]`. Back lands on a page that redirects you forward again: stuck. With `replace` the redirecting entry is swapped out: `[home, /login]` → `[home, /search]`, and Back goes home. A redirect shouldn't stay in history (like PHP's `header('Location: …')`).
+
+#### Questions and answers (step 10)
+
+1. **What does AuthProvider provide, and who reads it?** It holds the session state and puts `{ session, login, logout }` into AuthContext. Any component below reads it with `useAuth()` (`useContext` inside). Nothing in between passes anything: App, Layout and CompanyPage lost their session props.
+2. **Why does `useAuth()` throw on `null`?** Outside the provider it would get `null`. Throwing turns a silent bug ("session is null, so logged out?") into a clear error at once, and tells TypeScript the result is never null, so callers write `const { session } = useAuth()` without a check.
+3. **Why two files, AuthContext.ts and AuthProvider.tsx?** The react-refresh rule: hot reload can only swap files that export **only components**. AuthContext.ts exports a context, a hook and a type; AuthProvider.tsx only the component.
+4. **What does `replace` do on `<Navigate>`?** It swaps the current history entry instead of adding one, so Back doesn't land on the redirecting page (see above).
+5. **Nothing calls `navigate()` after login: how do you get back to `from`?** `login()` sets the session in the provider; every `useAuth()` user re-renders, including LoginPage, and now its `if (session) return <Navigate to={from} replace />` is true. The **re-render** redirects. `from` came from RequireAuth (or the company page's Link) through the location state.
 
 ## 10. More Vue to React
 

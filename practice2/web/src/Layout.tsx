@@ -1,12 +1,8 @@
 import { NavLink, Outlet } from 'react-router'
-import { type Session } from './auth/session'
+import { useAuth } from './auth/AuthContext'
 
-type Props = {
-    session: Session | null
-    onLogout: () => void
-}
-
-export default function Layout({ session, onLogout }: Props) {
+export default function Layout() {
+    const { session, logout } = useAuth()
     return (
         <>
             <header>
@@ -19,14 +15,14 @@ export default function Layout({ session, onLogout }: Props) {
                         <div>
                             <span> Welcome, {session.username}</span>
                             <span>({session.scopes.join(', ')})</span>
-                            <button className="logout" onClick={onLogout}>
+                            <button className="logout" onClick={logout}>
                                 Log out
                             </button>
                         </div>
                     </nav>
                 ) : (
                     <nav>
-                        Anonymous user, <NavLink to="/search">Log in</NavLink>
+                        Anonymous user, <NavLink to="/login">Log in</NavLink>
                     </nav>
                 )}
             </header>

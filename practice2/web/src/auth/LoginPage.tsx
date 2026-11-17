@@ -1,13 +1,18 @@
 import { useState, type SubmitEvent } from 'react'
-import { saveSession, type Session } from './session'
+import { type Session } from './session'
+import { useAuth } from './AuthContext'
+import { Navigate, useLocation } from 'react-router'
 
-type Props = { onLogin: (session: Session) => void }
+export default function LoginPage() {
+    const { session, login } = useAuth()
+    const from = useLocation().state?.from ?? '/search'
 
-export default function LoginPage({ onLogin }: Props) {
     const [username, setUsername] = useState('')
     const [password, setPassword] = useState('')
     const [error, setError] = useState<string | null>(null)
     const [busy, setBusy] = useState(false)
+
+    if (session) return <Navigate to={from} replace /> // after all hooks
 
     async function handleSubmit(e: SubmitEvent<HTMLFormElement>) {
         e.preventDefault()
@@ -28,9 +33,9 @@ export default function LoginPage({ onLogin }: Props) {
                 setError(`Login failed (${response.status})`)
                 return
             }
-            const session: Session = await response.json()
-            saveSession(session)
-            onLogin(session)
+            const newSession: Session = await response.json()
+
+            login(newSession)
         } catch {
             setError('Could not reach the server')
         } finally {

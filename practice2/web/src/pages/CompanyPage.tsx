@@ -3,8 +3,10 @@ import { Link, useLocation, useParams } from 'react-router'
 import { type CompanyDto, getCompany } from '../api'
 import { errorMessage } from '../helpers'
 import RoleList from '../components/RoleList'
+import { useAuth } from '../auth/AuthContext'
 
-export default function CompanyPage({ loggedIn }: { loggedIn: boolean }) {
+export default function CompanyPage() {
+    const { session } = useAuth()
     const { orgnr = '' } = useParams() // from the URL /companies/:orgnr
     const [company, setCompany] = useState<CompanyDto | null>(null)
     const [error, setError] = useState<string | null>(null)
@@ -57,7 +59,13 @@ export default function CompanyPage({ loggedIn }: { loggedIn: boolean }) {
                         </div>
                     </div>
                     {/* Roles */}
-                    {loggedIn ? <RoleList orgnr={company.orgnr} /> : <Link to="/search">Login to see the roles</Link>}
+                    {session ? (
+                        <RoleList orgnr={company.orgnr} />
+                    ) : (
+                        <Link to="/login" state={{ from: `/companies/${orgnr}` }}>
+                            Login to see the roles
+                        </Link>
+                    )}
                 </>
             )}
         </>

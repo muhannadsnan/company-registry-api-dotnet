@@ -1,6 +1,7 @@
-import type { Session } from '../auth/session'
+import { useAuth } from '../auth/AuthContext'
 
-export default function HomePage({ session }: { session: Session | null }) {
+export default function HomePage() {
+    const { session } = useAuth()
     return (
         <>
             <h1>HOME PAGE</h1>
