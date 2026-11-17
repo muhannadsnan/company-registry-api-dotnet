@@ -1,4 +1,4 @@
-import { loadSession } from './auth/session'
+import { clearSession, loadSession } from './auth/session'
 
 // The C# records, as the JSON arrives (camelCase).
 export type CompanyDto = {
@@ -42,6 +42,12 @@ async function apiFetch<T>(url: string): Promise<T> {
     const headers = new Headers()
     if (session) headers.set('Authorization', `Bearer ${session.token}`)
     const response = await fetch(url, { headers })
+    // Session expired or invalidated, not wrong username/password..
+    // Therefore we don't use apiFetch in LoginPage
+    if (response.status === 401 && session) {
+        clearSession()
+        window.dispatchEvent(new Event('auth:expired')) // which AuthProvider listens to
+    }
     if (!response.ok) throw new ApiError(response.status, `${response.status} ${response.statusText}`)
     return response.json()
 }

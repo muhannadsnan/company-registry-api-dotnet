@@ -23,7 +23,7 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 | 8 | Search kept in the URL | ✅ |
 | 9 | Layout route (header, footer, `<Outlet />`) | ✅ |
 | 10 | Auth context, route guard, username and Log out in the header | ✅ |
-| 11 | Token expiry: automatic logout, and a 401 sends you to the login page | ⏳ |
+| 11 | Token expiry: automatic logout, and a 401 sends you to the login page | ✅ |
 | 12 | Import page with polling (link only for users with `companies.import`) | ⏳ |
 | 13 | Tailwind: setup, then basic styling per element | ⏳ |
 | 14 | (main project, not React) RabbitMQ: a first quick try; practice3 repeats it | ⏳ |
@@ -913,6 +913,54 @@ if (session) return <Navigate to={from} replace />   // after all hooks
 3. **Why two files, AuthContext.ts and AuthProvider.tsx?** The react-refresh rule: hot reload can only swap files that export **only components**. AuthContext.ts exports a context, a hook and a type; AuthProvider.tsx only the component.
 4. **What does `replace` do on `<Navigate>`?** It swaps the current history entry instead of adding one, so Back doesn't land on the redirecting page (see above).
 5. **Nothing calls `navigate()` after login: how do you get back to `from`?** `login()` sets the session in the provider; every `useAuth()` user re-renders, including LoginPage, and now its `if (session) return <Navigate to={from} replace />` is true. The **re-render** redirects. `from` came from RequireAuth (or the company page's Link) through the location state.
+
+**Token expiry and 401 (best version: Part 3, step 11).** Two ways a session ends without clicking Log out:
+
+```tsx
+// AuthProvider.tsx, after the useState
+// 1. The token's time runs out: log out at that moment.
+useEffect(() => {
+    if (!session) return
+    const msLeft = new Date(session.expiresAt).getTime() - Date.now()
+    const timer = setTimeout(() => {
+        clearSession()
+        setSession(null)
+    }, msLeft)
+    return () => clearTimeout(timer) // a new login or logout cancels the old timer
+}, [session])
+
+// 2. The API says 401: apiFetch raises a window event, the provider listens.
+useEffect(() => {
+    function handleExpired() {
+        setSession(null)
+    }
+    window.addEventListener('auth:expired', handleExpired)
+    return () => window.removeEventListener('auth:expired', handleExpired)
+}, [])
+```
+
+```ts
+// api.ts, in apiFetch after the fetch
+if (response.status === 401 && session) {
+    clearSession()
+    window.dispatchEvent(new Event('auth:expired')) // AuthProvider listens
+}
+```
+
+- **The cleanup (the function an effect returns) is the effect's undo.** React keeps it and calls it **before the next run** and **on unmount**. Each run is a new function call with its own variables, so a run can't reach the previous run's `timer`; the cleanup from the run that created it can. Order: session A → timer A, returns "clear A"; session B → React calls "clear A", then sets timer B.
+- **add/removeEventListener** ≈ C# `event += handler` / `-= handler`; the returned cleanup ≈ `Dispose()`. Without it every mount adds another listener (StrictMode mounts twice in dev).
+- **A named `handleExpired`**: `addEventListener(…, setSession(null))` would *call* it at once; and `removeEventListener` needs **the same function reference**, so two inline arrows wouldn't match and nothing would be removed.
+- **React has no app-wide event system.** Inside React, events are props/callbacks (`onClick`, `onLogin`). `window` events are the browser's (DOM) system, a common bridge when non-React code must tell React something. Alternatives: a module-level callback, or a library's global error handler (React Query, Zustand).
+- **A hook** is a function named `use…` that reaches React's per-component memory (state, effects, context). React finds them by **call order during a component's render**, so they only work at the top of a component or another hook. `apiFetch` is a plain function: no React memory, callable anywhere (in `.then`, in handlers), so it can't call `useAuth()`; it dispatches an event instead.
+- **Can a token be revoked?** Not by default: a JWT is self-contained, and the API checks only its signature and expiry, with no lookup. "Revoking" means adding a check: a denylist of token ids (`jti`), a per-user "valid after" timestamp (ASP.NET Identity's security stamp), rotating the signing key (revokes **all** tokens), or short access tokens + **refresh tokens** that live in a database and can be deleted. Each one gives up some statelessness.
+
+#### Questions and answers (step 11)
+
+1. **Why inline `clearSession(); setSession(null)` instead of calling `logout`?** `logout` is declared in the component, so it's a **new function every render**. Used in the effect, ESLint would require `[session, logout]`, and the effect would rerun every render and restart the timer. `setSession` is stable and `clearSession` is an import, so `[session]` is enough.
+2. **What does `return () => clearTimeout(timer)` protect against?** You log out and log in again: without it, the **old** timer still fires at the old expiry and logs out the **new** session early.
+3. **Why can't apiFetch call `useAuth().logout()`?** Hooks only work in components or hooks, during render. apiFetch runs in `.then` chains and handlers, where React has no "current component". It dispatches a window event; AuthProvider (a component) listens and sets state.
+4. **Why `&& session`, and why does LoginPage avoid apiFetch?** A 401 without a token isn't an expiry, just an endpoint that needs login; there's nobody to log out. A wrong password is also a 401: through apiFetch it would count as "session expired" instead of showing "Wrong username or password".
+5. **Why isn't the timer enough?** It only knows the expiry time. A token can turn invalid earlier: the signing key changed (old signatures fail), localStorage was edited, or the server added a revocation check. Only the API knows, and says so with a 401.
 
 ## 10. More Vue to React
 

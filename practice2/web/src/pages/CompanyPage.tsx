@@ -44,7 +44,7 @@ export default function CompanyPage() {
             {!loading && company && (
                 <>
                     <h2>{company.name}</h2>
-                    <div className="details">
+                    <div className="details w-50">
                         <div>
                             <strong>Orgnr:</strong>
                             <span>{company.orgnr}</span>
