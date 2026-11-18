@@ -51,55 +51,65 @@ export default function SearchPage() {
         setSearchParams(params)
     }
 
+    const row = 'grid grid-cols-[8rem_1fr_4rem_7rem] gap-4 px-4 py-2'
+
     return (
         <>
-            <div id="searchPage">
-                <form onSubmit={handleSubmit}>
-                    <input
-                        type="text"
-                        value={name}
-                        onChange={(e) => setName(e.target.value)}
-                        placeholder="Company name"
-                    />
-                    <button type="submit">Search</button>
-                </form>
-                {loading && <p className="loading">Loading...</p>}
-                {!loading && error && <p role="alert">{error}</p>}
-                {!loading && result && (
-                    <>
-                        <p className="totalCount">{result.totalCount} companies</p>
-                        <div className="results">
-                            <div className="item bg-dark">
-                                <strong>Orgnr</strong>
-                                <strong className="name text-center">Name</strong>
-                                <strong>Form</strong>
-                                <strong>Registered</strong>
-                            </div>
-                            {result.items.map((c) => (
-                                <Link
-                                    to={`/companies/${c.orgnr}`}
-                                    state={{ backUrl: `/search?${searchParams}` }}
-                                    key={c.orgnr}
-                                >
-                                    <div className="item">
-                                        <span>{c.orgnr}</span>
-                                        <span className="name">{c.name}</span>
-                                        <span>{c.orgForm}</span>
-                                        <span>{c.registrationDate ?? '_'}</span>
-                                    </div>
-                                </Link>
-                            ))}
-                        </div>
+            <form onSubmit={handleSubmit} className="mb-4 flex gap-2">
+                <input
+                    type="text"
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder="Company name"
+                    className="flex-1 rounded border border-gray-700 bg-gray-950 px-3 py-2 focus:border-blue-500 focus:outline-none"
+                />
+                <button
+                    type="submit"
+                    className="rounded bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-500"
+                >
+                    Search
+                </button>
+            </form>
 
-                        <Paginator
-                            page={result.page}
-                            pageSize={result.pageSize}
-                            totalCount={result.totalCount}
-                            onPageChange={handlePageChange}
-                        />
-                    </>
-                )}
-            </div>
+            {loading && <p className="text-gray-400">Loading...</p>}
+            {!loading && error && (
+                <p role="alert" className="text-red-400">
+                    {error}
+                </p>
+            )}
+            {!loading && result && (
+                <>
+                    <p className="mb-2 text-sm text-gray-400">{result.totalCount} companies</p>
+                    <div className="overflow-hidden rounded-lg border border-gray-800">
+                        <div className={`${row} bg-gray-700 font-semibold text-gray-400`}>
+                            <span>Orgnr</span>
+                            <span>Name</span>
+                            <span>Form</span>
+                            <span>Registered</span>
+                        </div>
+                        {result.items.map((c) => (
+                            <Link
+                                to={`/companies/${c.orgnr}`}
+                                state={{ backUrl: `/search?${searchParams}` }}
+                                key={c.orgnr}
+                                className={`${row} border-t border-gray-800 hover:bg-gray-800 text-gray-400`}
+                            >
+                                <span className="font-mono text-sm">{c.orgnr}</span>
+                                <span>{c.name}</span>
+                                <span>{c.orgForm}</span>
+                                <span>{c.registrationDate ?? '–'}</span>
+                            </Link>
+                        ))}
+                    </div>
+
+                    <Paginator
+                        page={result.page}
+                        pageSize={result.pageSize}
+                        totalCount={result.totalCount}
+                        onPageChange={handlePageChange}
+                    />
+                </>
+            )}
         </>
     )
 }

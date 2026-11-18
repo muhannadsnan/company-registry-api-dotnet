@@ -25,7 +25,7 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 | 10 | Auth context, route guard, username and Log out in the header | ✅ |
 | 11 | Token expiry: automatic logout, and a 401 sends you to the login page | ✅ |
 | 12 | Import page with polling (link only for users with `companies.import`) | ✅ |
-| 13 | Tailwind: setup, then basic styling per element | ⏳ |
+| 13 | Tailwind: setup, then basic styling per element (13d: shared classes in `tw.ts` ⏳) | ✅ |
 | 14 | (main project, not React) RabbitMQ: a first quick try; practice3 repeats it | ⏳ |
 
 # Part 1: `web/`
@@ -1013,6 +1013,70 @@ if (response.status === 401 && session) {
 3. **Why can't apiFetch call `useAuth().logout()`?** Hooks only work in components or hooks, during render. apiFetch runs in `.then` chains and handlers, where React has no "current component". It dispatches a window event; AuthProvider (a component) listens and sets state.
 4. **Why `&& session`, and why does LoginPage avoid apiFetch?** A 401 without a token isn't an expiry, just an endpoint that needs login; there's nobody to log out. A wrong password is also a 401: through apiFetch it would count as "session expired" instead of showing "Wrong username or password".
 5. **Why isn't the timer enough?** It only knows the expiry time. A token can turn invalid earlier: the signing key changed (old signatures fail), localStorage was edited, or the server added a revocation check. Only the API knows, and says so with a 401.
+
+### Tailwind (Part 3, step 13)
+
+**What it is:** utility classes on the element (`className="px-4 py-2 bg-blue-600 rounded"`), one CSS rule each, instead of naming classes in a CSS file. The Vite plugin **reads the source files as plain text** at build time and generates CSS only for the class names it finds.
+
+```bash
+npm install -D tailwindcss@4.3.4 @tailwindcss/vite@4.3.4
+git mv src/index.css src/legacy.css          # my hand-written CSS, kept for reference, not imported
+```
+```ts
+// vite.config.ts
+import tailwindcss from '@tailwindcss/vite'
+plugins: [react(), tailwindcss()],
+```
+```css
+/* src/index.css (main.tsx already imports it) */
+@import 'tailwindcss';
+```
+VS Code: **Tailwind CSS IntelliSense** (autocomplete; hover shows the CSS). Every page looks plain at first: **Preflight** (Tailwind's reset) removes the browser defaults, so `h2` looks like text until styled.
+
+| Class | CSS |
+|---|---|
+| `px-4` / `py-2` | horizontal / vertical padding, 1rem / 0.5rem (scale: 1 = 0.25rem) |
+| `mx-auto` · `max-w-4xl` | centring · `max-width: 56rem` |
+| `flex flex-col gap-4` · `grid grid-cols-[8rem_1fr]` | flex column with a gap · an **arbitrary value** in `[]`, `_` = space |
+| `bg-gray-900` · `text-gray-400` | colours from a scale, 50 (light) to 950 (dark) |
+| `hover:` `focus:` `disabled:` · `disabled:hover:…` | **variants**: only in that state · variants stack |
+| `divide-y divide-gray-800` | a line **between** the children |
+| `tabular-nums` · `overflow-x-auto` | equal-width digits (no jiggle while polling) · scroll a wide table sideways |
+
+```tsx
+// NavLink's className can be a function that gets { isActive }
+function navClass({ isActive }: { isActive: boolean }) {
+    return isActive ? 'font-semibold text-white' : 'text-gray-400 hover:text-white'
+}
+<NavLink to="/search" className={navClass}>Search</NavLink>
+
+// A conditional class: both names appear in full
+className={`flex justify-between px-4 py-2 ${r.resigned ? 'text-gray-500 line-through' : ''}`}
+
+// A lookup for values: every full class name is in the file
+const statusClass: Record<ImportStatus, string> = {
+    Queued: 'text-yellow-400', Running: 'text-blue-400', Succeeded: 'text-green-400',
+    Failed: 'text-red-400', Abandoned: 'text-gray-500',
+}
+<td className={`${cell} ${statusClass[r.status]}`}>
+```
+
+**Reusing class combinations:**
+
+| Way | When |
+|---|---|
+| A React component (`<Button>`) | The recommended one: markup and behaviour (`type`, `disabled`) reused too |
+| A shared constant (`TW.btn.primary` in `tw.ts`) | My pick for now: TS autocomplete, tsc catches `TW.btn.primry` |
+| `@apply` in CSS (`.btn { @apply … }`) | Sparingly: back to naming CSS classes, typos fail silently |
+| `@theme` variables (`--color-brand`) | Design tokens (colours, fonts), not class combinations |
+
+#### Questions and answers
+
+1. **Where does the CSS for `px-4` come from, and why is the file small?** The plugin scans the source as text and generates CSS only for the classes it finds, not for all of Tailwind.
+2. **Why `` `${row} border-t` `` works but `` `bg-${color}-600` `` doesn't?** Tailwind never runs the JS. `row`'s classes are written out in full in the file; `bg-${color}-600` never appears as a whole name, so no CSS exists for it. Fix: a lookup with full names, `{ blue: 'bg-blue-600' }[color]`.
+3. **Why does `statusClass[r.status]` work?** All five full names are in the file, so all are generated; at runtime the index just picks one.
+4. **Why `Record<ImportStatus, string>`, not `Record<string, string>`?** It requires a key for every status: tsc errors on a missing or misspelled one. A new API status added to the type forces a colour; with `Record<string, string>` a missing key is silently `undefined` (no colour).
+5. **`npm audit` showed 12 vulnerabilities after the install?** Not from Tailwind: minimatch (via typescript-eslint) and picomatch (via Vite), dev tools only, ReDoS in file-pattern matching on my machine. `npm audit --omit=dev` (what ships) showed 0. `npm audit fix` is safe; **never `--force`** (jumps major versions).
 
 ## 10. More Vue to React
 

@@ -33,37 +33,37 @@ export default function CompanyPage() {
 
     return (
         <>
-            <div className="d-flex">
-                <Link to={backUrl} className="btn">
-                    ← Back to search
-                </Link>
-            </div>
+            <Link to={backUrl} className="text-sm text-blue-400 hover:bg-gray-700 p-4 bg-gray-800 rounded">
+                ← Back to search
+            </Link>
 
-            {loading && <p className="loading">Loading...</p>}
-            {!loading && error && <p role="alert">{error}</p>}
+            {loading && <p className="mt-4 text-gray-400">Loading...</p>}
+            {!loading && error && (
+                <p role="alert" className="mt-4 text-red-400">
+                    {error}
+                </p>
+            )}
             {!loading && company && (
                 <>
-                    <h2>{company.name}</h2>
-                    <div className="details w-50">
-                        <div>
-                            <strong>Orgnr:</strong>
-                            <span>{company.orgnr}</span>
-                        </div>
-                        <div>
-                            <strong>Form:</strong>
-                            <span>{company.orgForm}</span>
-                        </div>
-                        <div>
-                            <strong>Registered:</strong>
-                            <span>{company.registrationDate ?? '_'}</span>
-                        </div>
-                    </div>
-                    {/* Roles */}
+                    <h2 className="mt-4 mb-4 text-2xl text-center font-semibold">{company.name}</h2>
+                    <dl className="grid max-w-md mx-auto grid-cols-[8rem_1fr] gap-x-4 gap-y-2 rounded-lg border border-gray-800 bg-gray-900 p-4">
+                        <dt className="text-gray-400">Orgnr</dt>
+                        <dd className="font-mono">{company.orgnr}</dd>
+                        <dt className="text-gray-400">Form</dt>
+                        <dd>{company.orgForm}</dd>
+                        <dt className="text-gray-400">Registered</dt>
+                        <dd>{company.registrationDate ?? '–'}</dd>
+                    </dl>
+
                     {session ? (
                         <RoleList orgnr={company.orgnr} />
                     ) : (
-                        <Link to="/login" state={{ from: `/companies/${orgnr}` }}>
-                            Login to see the roles
+                        <Link
+                            to="/login"
+                            state={{ from: `/companies/${orgnr}` }}
+                            className="mt-6 inline-block text-blue-400 hover:underline"
+                        >
+                            Log in to see the roles
                         </Link>
                     )}
                 </>
