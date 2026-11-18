@@ -4,6 +4,7 @@ import { type CompanyDto, getCompany } from '../api'
 import { errorMessage } from '../helpers'
 import RoleList from '../components/RoleList'
 import { useAuth } from '../auth/AuthContext'
+import { TW } from '../tw'
 
 export default function CompanyPage() {
     const { session } = useAuth()
@@ -37,9 +38,9 @@ export default function CompanyPage() {
                 ← Back to search
             </Link>
 
-            {loading && <p className="mt-4 text-gray-400">Loading...</p>}
+            {loading && <p className={`mt-4 ${TW.muted}`}>Loading...</p>}
             {!loading && error && (
-                <p role="alert" className="mt-4 text-red-400">
+                <p role="alert" className={`mt-4 ${TW.error}`}>
                     {error}
                 </p>
             )}
@@ -61,7 +62,7 @@ export default function CompanyPage() {
                         <Link
                             to="/login"
                             state={{ from: `/companies/${orgnr}` }}
-                            className="mt-6 inline-block text-blue-400 hover:underline"
+                            className={`mt-6 inline-block ${TW.link}`}
                         >
                             Log in to see the roles
                         </Link>

@@ -25,7 +25,7 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 | 10 | Auth context, route guard, username and Log out in the header | ✅ |
 | 11 | Token expiry: automatic logout, and a 401 sends you to the login page | ✅ |
 | 12 | Import page with polling (link only for users with `companies.import`) | ✅ |
-| 13 | Tailwind: setup, then basic styling per element (13d: shared classes in `tw.ts` ⏳) | ✅ |
+| 13 | Tailwind: setup, basic styling per element, shared classes in `tw.ts` (13d) | ✅ |
 | 14 | (main project, not React) RabbitMQ: a first quick try; practice3 repeats it | ⏳ |
 
 # Part 1: `web/`
@@ -1077,6 +1077,25 @@ const statusClass: Record<ImportStatus, string> = {
 3. **Why does `statusClass[r.status]` work?** All five full names are in the file, so all are generated; at runtime the index just picks one.
 4. **Why `Record<ImportStatus, string>`, not `Record<string, string>`?** It requires a key for every status: tsc errors on a missing or misspelled one. A new API status added to the type forces a colour; with `Record<string, string>` a missing key is silently `undefined` (no colour).
 5. **`npm audit` showed 12 vulnerabilities after the install?** Not from Tailwind: minimatch (via typescript-eslint) and picomatch (via Vite), dev tools only, ReDoS in file-pattern matching on my machine. `npm audit --omit=dev` (what ships) showed 0. `npm audit fix` is safe; **never `--force`** (jumps major versions).
+
+**Shared classes: `src/tw.ts` (step 13d).**
+```ts
+export const TW = {
+    btn: {
+        primary: 'rounded bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-500 disabled:opacity-50',
+        secondary: 'rounded border border-gray-700 bg-gray-900 px-3 py-1 hover:bg-black disabled:opacity-40 disabled:hover:bg-gray-900',
+    },
+    input: 'rounded border border-gray-700 bg-gray-950 px-3 py-2 focus:border-blue-500 focus:outline-none',
+    link: 'text-blue-400 hover:opacity-80',
+    error: 'text-red-400',
+    muted: 'text-gray-400',
+}
+// <button className={TW.btn.primary}>   <input className={`flex-1 ${TW.input}`} />
+```
+- **`TW` holds what an element *is*; the page adds where it *sits*** (`mt-6`, `flex-1`, `ml-2`). Spacing depends on the place, so it stays local.
+- **Never add a conflicting class** to a `TW` value (`${TW.btn.secondary} bg-black`): which wins depends on the order in Tailwind's generated CSS, not in the string. Add a new variant in `tw.ts` instead.
+- **Opacity:** `hover:opacity-80` fades the whole element by 20%; `text-blue-400/80` (a `/` after a colour) sets only that colour's alpha.
+- VS Code user setting so IntelliSense works inside the strings: `"tailwindCSS.experimental.classRegex": ["TW\\s*=\\s*\\{([\\s\\S]*?)\\n\\}"]`.
 
 ## 10. More Vue to React
 

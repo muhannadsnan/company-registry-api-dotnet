@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { ApiError, listImports, startImport, type ImportRunDto, type ImportStatus } from '../api'
+import { TW } from '../tw'
 
 function messageFor(e: unknown) {
     if (!(e instanceof ApiError)) return 'Could not reach the server'
@@ -58,21 +59,17 @@ export default function ImportsPage() {
         <>
             <div className="mb-4 flex items-center justify-between">
                 <h2 className="text-2xl font-semibold">Imports</h2>
-                <button
-                    onClick={handleStart}
-                    disabled={starting || activeId !== undefined}
-                    className="rounded bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-500 disabled:opacity-50"
-                >
+                <button onClick={handleStart} disabled={starting || activeId !== undefined} className={TW.btn.primary}>
                     {activeId !== undefined ? 'Import running…' : 'Start import'}
                 </button>
             </div>
 
             {error && (
-                <p role="alert" className="mb-4 text-red-400">
+                <p role="alert" className={`mb-4 ${TW.error}`}>
                     {error}
                 </p>
             )}
-            {runs === null && !error && <p className="text-gray-400">Loading...</p>}
+            {runs === null && !error && <p className={TW.muted}>Loading...</p>}
             {runs && (
                 <div className="overflow-x-auto rounded-lg border border-gray-800">
                     <table className="w-full text-sm">

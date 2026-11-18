@@ -1,5 +1,6 @@
 import { NavLink, Outlet } from 'react-router'
 import { useAuth } from './auth/AuthContext'
+import { TW } from './tw'
 
 export default function Layout() {
     const { session, logout } = useAuth()
@@ -13,10 +14,12 @@ export default function Layout() {
             <div className="flex min-h-screen flex-col bg-gray-900 text-gray-200">
                 <header className="border-b border-gray-700 bg-gray-800">
                     <div className="mx-auto flex max-w-4xl items-center justify-between px-4 py-3">
-                        <h1 className="text-xl font-semibold">Practice 2</h1>
+                        <h1 className="text-xl font-semibold">
+                            <NavLink to="/">Practice 2</NavLink>
+                        </h1>
                         {session ? (
-                            <nav className="flex items-center gap-4 text-sm">
-                                <div>
+                            <nav className="flex flex-1 items-center justify-between gap-4 text-sm ml-3">
+                                <div className="flex gap-4">
                                     <NavLink to="/" className={navClass}>
                                         Home
                                     </NavLink>
@@ -34,17 +37,17 @@ export default function Layout() {
                                 <div className="flex gap-4 items-center">
                                     <span className="text-gray-500"> Welcome, {session.username}</span>
                                     <span>({session.scopes.join(', ')})</span>
-                                    <button
-                                        onClick={logout}
-                                        className="rounded border border-gray-700 px-3 py-1 bg-gray-900 hover:bg-black"
-                                    >
+                                    <button onClick={logout} className={TW.btn.secondary}>
                                         Log out
                                     </button>
                                 </div>
                             </nav>
                         ) : (
                             <nav className="text-sm">
-                                Anonymous user, <NavLink to="/login">Log in</NavLink>
+                                Anonymous user
+                                <NavLink to="/login" className={`ml-2 ${TW.btn.secondary}`}>
+                                    Log in
+                                </NavLink>
                             </nav>
                         )}
                     </div>

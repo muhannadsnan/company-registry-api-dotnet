@@ -2,6 +2,7 @@ import { useEffect, useState, type SubmitEvent } from 'react'
 import { ApiError, searchCompanies, type CompanyDto, type PageResult } from '../api'
 import Paginator from '../components/Paginator'
 import { Link, useSearchParams } from 'react-router'
+import { TW } from '../tw'
 
 export default function SearchPage() {
     const [searchParams, setSearchParams] = useSearchParams()
@@ -61,19 +62,16 @@ export default function SearchPage() {
                     value={name}
                     onChange={(e) => setName(e.target.value)}
                     placeholder="Company name"
-                    className="flex-1 rounded border border-gray-700 bg-gray-950 px-3 py-2 focus:border-blue-500 focus:outline-none"
+                    className={`flex-1 ${TW.input}`}
                 />
-                <button
-                    type="submit"
-                    className="rounded bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-500"
-                >
+                <button type="submit" className={TW.btn.primary}>
                     Search
                 </button>
             </form>
 
-            {loading && <p className="text-gray-400">Loading...</p>}
+            {loading && <p className={TW.muted}>Loading...</p>}
             {!loading && error && (
-                <p role="alert" className="text-red-400">
+                <p role="alert" className={TW.error}>
                     {error}
                 </p>
             )}
