@@ -3,6 +3,8 @@ import { useAuth } from './auth/AuthContext'
 
 export default function Layout() {
     const { session, logout } = useAuth()
+    const canImport = session?.scopes.includes('companies.import') ?? false
+
     return (
         <>
             <header>
@@ -10,7 +12,12 @@ export default function Layout() {
                 {session ? (
                     <nav className="d-flex justify-content-around">
                         <div>
-                            <NavLink to="/">Home</NavLink> | <NavLink to="/search">Search</NavLink>
+                            <NavLink to="/">Home</NavLink>&nbsp; | &nbsp;<NavLink to="/search">Search</NavLink>
+                            {canImport && (
+                                <>
+                                    &nbsp; | &nbsp;<NavLink to="/imports">Imports</NavLink>
+                                </>
+                            )}
                         </div>
                         <div>
                             <span> Welcome, {session.username}</span>

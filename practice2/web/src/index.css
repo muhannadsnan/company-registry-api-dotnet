@@ -246,6 +246,11 @@ button.login {
     border: 0px #ccc solid;
     padding: 5px;
 }
+#importPage table tr.running {
+    font-weight: bold;
+    color: #a8ac3e;
+    background: #222;
+}
 /***************/
 .details {
     display: flex;

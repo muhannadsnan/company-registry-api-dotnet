@@ -6,6 +6,7 @@ import CompanyPage from './pages/CompanyPage'
 import Layout from './Layout'
 import HomePage from './pages/HomePage'
 import RequireAuth from './auth/RequireAuth'
+import ImportsPage from './pages/ImportsPage'
 
 function App() {
     return (
@@ -16,6 +17,7 @@ function App() {
                 <Route path="/companies/:orgnr" element={<CompanyPage />} />
                 <Route element={<RequireAuth />}>
                     <Route path="/search" element={<SearchPage />} />
+                    <Route path="/imports" element={<ImportsPage />} />
                 </Route>
                 <Route path="*" element={<NotFoundPage />} />
             </Route>

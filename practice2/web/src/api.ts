@@ -37,11 +37,11 @@ export type RoleDto = {
 //====================================================
 
 // Every API call goes through here: the one place that knows about the token.
-async function apiFetch<T>(url: string): Promise<T> {
+async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
     const session = loadSession()
-    const headers = new Headers()
+    const headers = new Headers(init?.headers)
     if (session) headers.set('Authorization', `Bearer ${session.token}`)
-    const response = await fetch(url, { headers })
+    const response = await fetch(url, { ...init, headers })
     // Session expired or invalidated, not wrong username/password..
     // Therefore we don't use apiFetch in LoginPage
     if (response.status === 401 && session) {
@@ -63,4 +63,32 @@ export function getCompany(orgnr: string) {
 
 export function getRoles(orgnr: string) {
     return apiFetch<RoleDto[]>(`/api/companies/${encodeURIComponent(orgnr)}/roles`)
+}
+
+//=========================== IMPORT
+
+export type ImportStatus = 'Queued' | 'Running' | 'Succeeded' | 'Failed' | 'Abandoned'
+
+export type ImportRunDto = {
+    id: number
+    correlationId: string | null
+    status: ImportStatus
+    queuedAt: string
+    startedAt: string | null
+    finishedAt: string | null
+    read: number
+    inserted: number
+    updated: number
+    unchanged: number
+    rejected: number
+    rolesSaved: number
+    error: string | null
+}
+
+export function listImports() {
+    return apiFetch<ImportRunDto[]>('/api/imports')
+}
+
+export function startImport() {
+    return apiFetch<ImportRunDto>('/api/imports', { method: 'POST' })
 }

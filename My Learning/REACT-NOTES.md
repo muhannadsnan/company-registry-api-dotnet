@@ -24,7 +24,7 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 | 9 | Layout route (header, footer, `<Outlet />`) | ✅ |
 | 10 | Auth context, route guard, username and Log out in the header | ✅ |
 | 11 | Token expiry: automatic logout, and a 401 sends you to the login page | ✅ |
-| 12 | Import page with polling (link only for users with `companies.import`) | ⏳ |
+| 12 | Import page with polling (link only for users with `companies.import`) | ✅ |
 | 13 | Tailwind: setup, then basic styling per element | ⏳ |
 | 14 | (main project, not React) RabbitMQ: a first quick try; practice3 repeats it | ⏳ |
 
@@ -520,6 +520,9 @@ Rule: every value from the component that the effect *uses* goes in the list. ES
 | (Part 3) Moved the search to `/search` (HomePage at `/`), but `backUrl` and the logged-out "Log in" still pointed at `/` | Moving a route means searching for every link to it (`grep -rn 'to="/"'` and `backUrl`): tsc can't know a path string is wrong |
 | (Part 3) App kept its own `session` useState after the AuthProvider, and passed it to HomePage | A **second copy**: login changed the provider's session, App's stayed null, so HomePage said "click login" until a refresh. tsc flagged the leftover `handleLogout`. A context is one source of truth: read it with `useAuth()` |
 | (Part 3) `const session = await response.json()` inside LoginPage, which also has `session` from `useAuth()` | Works (the inner name hides the outer one) but reads wrong: name it `newSession` |
+| (Part 3) `canImport` computed in Layout but never used: the Imports link showed for everyone | tsc's "declared but never read" was the hint; the value has to wrap the link: `{canImport && …}` |
+| (Part 3) `/imports` outside `<RequireAuth>`: logged out, it showed "Request failed (401)" | apiFetch raises the expiry event only when there *was* a session; a page that needs a login belongs inside the guard |
+| (Part 3) The poll's `.catch((e) => messageFor(e))` | It computed the message and threw it away: a failed poll showed nothing. `setError(messageFor(e))` |
 
 ---
 
@@ -691,27 +694,76 @@ const backUrl = useLocation().state?.backUrl ?? '/'
 4. **Why `new URLSearchParams(searchParams)` and not `{ ...searchParams, page }`?** Spread copies only own properties and URLSearchParams has none, so `name` is dropped (Next on "fjord" gave `/?page=2`, all companies). The copy constructor copies every entry; `set` changes only page.
 5. **`state` on the Link vs the search in the company URL?** State is invisible and lives in the history entry; the URL stays clean. A directly opened link has no state, so Back goes to `/`. In the URL (`?from=…`) it would survive sharing, but it's ugly and every page must pass it on.
 
-### An effect with cleanup: polling on `ImportsPage.tsx`
+### An effect with cleanup: polling on `ImportsPage.tsx` (best version: Part 3, step 12)
 
-```tsx
-useEffect(() => {
-    if (!isActive || runId === undefined) {
-        return
-    }
-    const timer = setInterval(async () => {
-        setRun(await getImport(runId))
-    }, 1000)
-    return () => clearInterval(timer)           // the cleanup
-}, [isActive, runId])
+```ts
+// api.ts: apiFetch learns POST; the rest of it unchanged
+async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
+    const session = loadSession()
+    const headers = new Headers(init?.headers)
+    if (session) headers.set('Authorization', `Bearer ${session.token}`)
+    const response = await fetch(url, { ...init, headers }) // keeps method, puts the merged headers on top
+    ...
+}
+export type ImportStatus = 'Queued' | 'Running' | 'Succeeded' | 'Failed' | 'Abandoned'
+export type ImportRunDto = { id: number; status: ImportStatus; queuedAt: string; read: number; inserted: number; /* … the C# record */ }
+export function listImports() { return apiFetch<ImportRunDto[]>('/api/imports') }
+export function startImport() { return apiFetch<ImportRunDto>('/api/imports', { method: 'POST' }) } // 202 is ok (2xx)
 ```
 
-- React runs the cleanup **before the effect runs again** and **when the component disappears**
-  (Vue's `onUnmounted`, attached to the effect).
-- The polling stops by itself: the status becomes `Succeeded`, `isActive` turns false, React cleans up the
-  timer, and the effect returns early.
-- Without the cleanup, leaving the page mid-import leaves a timer running forever. StrictMode's double run
-  in development exists to expose exactly this.
-- This is the client half of the API's **202 Accepted** pattern: "accepted, here's the run id, poll it".
+```tsx
+// pages/ImportsPage.tsx
+const [runs, setRuns] = useState<ImportRunDto[] | null>(null)
+const [error, setError] = useState<string | null>(null)
+const [starting, setStarting] = useState(false)
+const activeId = runs?.find(isActive)?.id // derived: a number, or undefined
+
+useEffect(() => {                         // [] = once, after the first render
+    listImports().then(setRuns).catch((e) => setError(messageFor(e)))
+}, [])
+
+useEffect(() => {                         // poll while a run is Queued/Running
+    if (activeId === undefined) return
+    const timer = setInterval(() => {
+        listImports().then(setRuns).catch((e) => setError(messageFor(e)))
+    }, 2000)
+    return () => clearInterval(timer)
+}, [activeId])
+
+function handleStart() {
+    setStarting(true)
+    setError(null)
+    startImport()
+        .then((run) => setRuns((prev) => [run, ...(prev ?? [])])) // the function form: latest state
+        .catch((e) => setError(messageFor(e)))                     // 403 not allowed, 409 already running
+        .finally(() => setStarting(false))
+}
+// <button onClick={handleStart} disabled={starting || activeId !== undefined}>
+```
+
+```tsx
+// App.tsx: inside <RequireAuth>, next to /search
+<Route path="/imports" element={<ImportsPage />} />
+
+// Layout.tsx: the link only with the scope
+const canImport = session?.scopes.includes('companies.import') ?? false
+{canImport && <> | <NavLink to="/imports">Imports</NavLink></>}
+```
+
+- **`.then(setRuns)`** passes the function; `.then` calls it with the data. Same as `.then((list) => setRuns(list))`. `.then(() => setRuns)` only *returns* the setter and sets nothing. C#: a method group, `Select(RoleDto.Fill)`.
+- **`[item, ...list]`** is a **new** array with `item` first (the immutable "unshift"). `list.unshift(item)` mutates in place and returns the **length**. **Never mutate state:** React compares by reference, sees the same array, and doesn't re-render.
+- **A setter takes a value or a function:** `setRuns(prev => [run, ...prev])` gets the latest state when React applies the update. Use it when the new state depends on the old.
+- **`setInterval` vs a recursive `setTimeout`:** setTimeout fires once; polling with it means scheduling the next one after each response (never overlaps slow requests, sometimes better). Either way the cleanup must clear it: the cleanup undoes **anything the effect started**.
+- **StrictMode** mounts twice in development, so the Network tab shows two `GET /api/imports` on load. Not in production.
+- This is the client half of the API's **202 Accepted** pattern.
+
+#### Questions and answers
+
+1. **Why `[activeId]` and not `[runs]`?** React compares dependencies by **reference** (`Object.is`). Each poll sets a **new array**, so `[runs]` would count as changed after every poll: clear the interval, start a new one, forever. `activeId` is a number; the same id is unchanged, so the interval runs untouched until the id changes.
+2. **How does the polling stop by itself?** The last poll returns Succeeded → `setRuns` → re-render → `activeId` recomputed as `undefined` → the dependency changed, so React runs the cleanup (`clearInterval`), then the effect, which returns early.
+3. **Why `setRuns(prev => [run, ...(prev ?? [])])` and not `setRuns([run, ...runs])`?** `runs` in handleStart is the value from the render of the click. The POST takes a while; a poll's `setRuns` can land in between, and `[run, ...runs]` would overwrite that newer list with a stale one. `prev` is the latest state.
+4. **A user without `companies.import` opens `/imports`?** No link in the header (UX). The page loads, the API answers **403 Forbidden** (401 means not logged in), and the page shows "You are not allowed to run imports". The **API's policy** `[Authorize(Policy = "companies.import")]` stops them; RequireAuth only checks the login, not the scope.
+5. **Why 202 and not 200 with the result?** 202 = "accepted, not done". The import runs in a BackgroundService, independent of the request; the response carries the run (and a Location header), and the client polls. A 200 with the whole import inside the request would hang for minutes, hit proxy and browser timeouts, and die if the connection dropped.
 
 ### Layout route and nested routes: `Layout.tsx` + `App.tsx` (best version: Part 3, step 9)
 
