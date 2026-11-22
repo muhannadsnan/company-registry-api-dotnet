@@ -21,6 +21,13 @@ public sealed class CompanyImporter(
         var run = await db.ImportRuns.FindAsync([importRunId], ct)
             ?? throw new InvalidOperationException($"Import run {importRunId} does not exist.");
 
+        // Cancelled means "stopped by a shutdown", may run again, but a finished run may not
+        if (run.IsFinal)
+        {
+            logger.LogInformation("Import run {ImportRunId} already finished as {Status}; skipping", run.Id, run.Status);
+            return;
+        }
+
         using var scope = logger.BeginScope("ImportRun {ImportRunId}, CorrelationId {CorrelationId}", run.Id, run.CorrelationId);
 
         run.Status = ImportStatus.Running;

@@ -17,6 +17,13 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  #################
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    ports:
+      - "5672:5672"   # AMQP: the port the API talks to
+      - "15672:15672" # management UI in the browser, login guest / guest
 
 volumes:
   pgdata:
+

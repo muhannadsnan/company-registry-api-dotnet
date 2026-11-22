@@ -2197,3 +2197,184 @@ public class ImportPipelineTests(ApiFactory api)
 3. **Import:** `POST /api/imports` → `import_runs` row + queue → 202 → worker (new scope) → Brreg page →
    MOD11 → upsert via change tracking → commit per page → counts in `import_runs`, logs under the
    correlation id that started it.
+
+---
+
+## 7. Step 14 (21–22 Nov 2026): RabbitMQ as an optional queue
+
+A first try with plain `RabbitMQ.Client` 7.2.2 (no MassTransit). practice3 repeats it for fluency.
+**The in-memory queue stays the default**, so Render, the tests and CI are unchanged. RabbitMQ runs
+locally with `Queue__Provider=RabbitMq`.
+
+### The picture: a jobs table with a cron worker
+Without a broker you would build it in MySQL: the API inserts `(run_id, 'pending')` into a `jobs`
+table (the **producer**), and a cron script selects pending rows, runs them and deletes them (the
+**consumer**). RabbitMQ is a server made only for that jobs table, with three improvements:
+- **No polling.** The worker keeps one connection open and RabbitMQ pushes each message the moment it
+  arrives. Nobody asks "anything new?" every minute.
+- **Delete only when done (ack).** RabbitMQ lends the message to the worker and keeps the original as
+  *Unacked*. Only the worker's **ack** deletes it. If the worker's connection closes first, the message
+  goes back to *Ready* and is delivered again: **at-least-once delivery**, so the worker must be
+  **idempotent**.
+- **Separate processes.** Producer and consumer only talk through the broker, so the worker could move
+  to its own service, and several workers could share one queue (**competing consumers**).
+
+In our project producer and consumer are still **one app, one process**. The broker makes it possible to
+split them without changing their code; the in-memory `Channel` does not.
+
+**Management UI counters** (http://localhost:15672, guest/guest): *Ready* = waiting, *Unacked* = handed
+to a worker, not yet done, then gone after the ack. **State: running** is the queue itself (it exists and
+works), not an import.
+
+### Files
+```
+docker-compose.yml                         + rabbitmq service (rabbitmq:4-management-alpine, ports 5672 and 15672)
+Import/QueueOptions.cs                     Queue:Provider ("InMemory" | "RabbitMq"), HostName, QueueName
+Import/IImportQueue.cs                     EnqueueAsync(long importRunId, ct): what ImportRunService depends on
+Import/ImportQueue.cs                      the in-memory Channel, now ": IImportQueue"
+Import/RabbitMq/RabbitMqImportQueue.cs     publisher: declare the queue, publish the run id as a persistent message
+Import/RabbitMq/RabbitMqImportConsumer.cs  BackgroundService: prefetch 1, manual ack, runs CompanyImporter
+Data/ImportRun.cs                          + IsFinal (Succeeded, Failed, Abandoned)
+Import/CompanyImporter.cs                  skips a run that IsFinal (a duplicate delivery)
+```
+
+### Program.cs: the switch
+```csharp
+// Queue: in memory by default (Render, tests, CI); RabbitMQ when Queue__Provider=RabbitMq.
+builder.Services.AddOptions<QueueOptions>()
+    .Bind(builder.Configuration.GetSection(QueueOptions.Section));
+if (builder.Configuration.GetValue<string>("Queue:Provider") == "RabbitMq")
+{
+    builder.Services.AddSingleton<IImportQueue, RabbitMqImportQueue>();
+    builder.Services.AddHostedService<RabbitMqImportConsumer>();
+}
+else
+{
+    builder.Services.AddSingleton<ImportQueue>();
+    builder.Services.AddSingleton<IImportQueue>(sp => sp.GetRequiredService<ImportQueue>());
+    builder.Services.AddHostedService<ImportWorker>();
+}
+```
+**Why the lambda line?** Two plain registrations (`AddSingleton<ImportQueue>()` and
+`AddSingleton<IImportQueue, ImportQueue>()`) create **two objects**: the service would write into
+queue A and the worker would read queue B, so nothing would ever arrive. The lambda hands out the same
+singleton for both.
+
+### The publisher
+```csharp
+public sealed class RabbitMqImportQueue(IOptions<QueueOptions> options) : IImportQueue
+{
+    public async ValueTask EnqueueAsync(long importRunId, CancellationToken ct)
+    {
+        var o = options.Value;
+        var factory = new ConnectionFactory { HostName = o.HostName };
+        await using var connection = await factory.CreateConnectionAsync(ct);
+        await using var channel = await connection.CreateChannelAsync(cancellationToken: ct);
+
+        // Idempotent: creates the queue if it is missing, does nothing if it exists with the same settings.
+        await channel.QueueDeclareAsync(o.QueueName, durable: true, exclusive: false, autoDelete: false, cancellationToken: ct);
+
+        var body = Encoding.UTF8.GetBytes(importRunId.ToString());
+        var properties = new BasicProperties { Persistent = true }; // stored on disk, survives a broker restart
+        await channel.BasicPublishAsync(exchange: "", routingKey: o.QueueName, mandatory: false,
+            basicProperties: properties, body: body, cancellationToken: ct);
+    }
+}
+```
+- **Default exchange `""`** routes by queue name. Publishers really publish to an *exchange*, which routes
+  to queues; the default one is the simplest.
+- **Why the publisher declares the queue too:** a message for a queue that does not exist yet is silently
+  dropped. Declaring is "create if missing", like `CREATE TABLE IF NOT EXISTS`, so both sides do it.
+- **Only the id is sent:** the `import_runs` row is the single source of truth; the message is a small
+  pointer to it, so nothing is copied that could go stale.
+- **A connection per message** is fine for a rare import. A busy system keeps one long-lived connection,
+  like a database connection pool.
+
+### The consumer
+```csharp
+await channel.QueueDeclareAsync(o.QueueName, durable: true, exclusive: false, autoDelete: false, cancellationToken: stoppingToken);
+// Prefetch 1: RabbitMQ hands over the next message only after this one is acked.
+await channel.BasicQosAsync(prefetchSize: 0, prefetchCount: 1, global: false, stoppingToken);
+
+var consumer = new AsyncEventingBasicConsumer(channel);
+consumer.ReceivedAsync += async (_, message) =>
+{
+    try
+    {
+        var runId = long.Parse(Encoding.UTF8.GetString(message.Body.Span));
+        await using var scope = scopeFactory.CreateAsyncScope();
+        await scope.ServiceProvider.GetRequiredService<CompanyImporter>().RunAsync(runId, stoppingToken);
+        if (stoppingToken.IsCancellationRequested)
+        {
+            // The app is stopping and the import was cut short. No ack: RabbitMQ keeps the
+            // message and delivers it again on the next start.
+            return;
+        }
+        await channel.BasicAckAsync(message.DeliveryTag, multiple: false); // done: RabbitMQ deletes it
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Could not process an import message; dropping it");
+        await channel.BasicNackAsync(message.DeliveryTag, multiple: false, requeue: false); // don't retry forever
+    }
+};
+
+// autoAck: false = we ack ourselves, after the work is done.
+await channel.BasicConsumeAsync(o.QueueName, autoAck: false, consumer, stoppingToken);
+// Keep the connection open until the app stops; RabbitMQ calls the handler above.
+await Task.Delay(Timeout.Infinite, stoppingToken);
+```
+And in `CompanyImporter.RunAsync`, right after loading the run:
+```csharp
+if (run.IsFinal) { logger.LogInformation("... already finished as {Status}; skipping", ...); return; }
+```
+```csharp
+// ImportRun.cs. Succeeded, Failed and Abandoned never change again. Cancelled is not final: it may run again.
+public bool IsFinal => Status is ImportStatus.Succeeded or ImportStatus.Failed or ImportStatus.Abandoned;
+```
+`IsActive` (Queued or Running) stays as it is, because the 409 rule uses it: a Cancelled run must not
+block new imports.
+
+### What the tests on 21–22 Nov showed
+| Test | What happened |
+|---|---|
+| POST with no consumer yet (14a) | 202, run 6 Queued; UI: Ready 1, Consumers 0, Connections 0 (the publisher closed its connection) |
+| Start the consumer (14b) | Ready 1 → Unacked 1 → 0; run 6 Succeeded. The message waited for the worker |
+| Ctrl+C before 14c (run 7) | Importer saved Cancelled; the ack lost the race with the shutdown, so Ready 1; on restart the old check skipped it as finished. Run 7 stays Cancelled |
+| Ctrl+C after 14c (run 9) | Cancelled, Ready 1; restart → Unacked → 0, run 9 Succeeded. A graceful stop hands the job back, every time |
+
+### Interview answers
+- **What is RabbitMQ?** "A message broker: a server that holds messages between a producer and a
+  consumer. The producer publishes, the broker pushes the message to a consumer, and deletes it only when
+  the consumer acks."
+- **autoAck false?** "With autoAck true, the broker deletes the message the moment it hands it over. If
+  the worker crashes mid-import, the job is lost."
+- **Prefetch 1?** "The broker gives this worker one message at a time and the next only after the ack, so
+  imports run one by one, like the old `await foreach`."
+- **Why no `AbandonInterruptedRunsAsync` in the RabbitMQ consumer?** "An in-memory queue is wiped by a
+  restart, so Queued runs would never run and have to be marked Abandoned. With RabbitMQ the message
+  survives the restart, so the run still gets imported."
+- **When does the same message arrive twice?** "When the worker crashes after the work but before the
+  ack. The `IsFinal` check sees the run is done and skips it; the ack then deletes the duplicate. What
+  stops redelivery is the ack, not the run's status."
+- **Why is running an import again safe?** "The upsert matches companies on organisation number, so a
+  repeat updates or leaves rows unchanged; it never inserts duplicates."
+- **How did the graceful stop hand the job back?** "It never left the broker. It was lent out as Unacked;
+  we returned without acking, the connection closed, and the broker put it back to Ready."
+- **Save the row, then publish: what if RabbitMQ is down?** "The row stays Queued forever and the
+  one-active-import rule then answers 409 to every new import. The fix is the **outbox pattern**: write
+  the message into a table in the same database transaction, and a background job sends it to the
+  broker."
+- **Can several imports queue up, or run in parallel?** "The broker can hold many messages, oldest first.
+  The 409 is our own rule, because every import fetches the same Brreg data. To scale, start more
+  consumers on the same queue (competing consumers)."
+- **Was RabbitMQ needed here?** "No. The in-memory queue was enough, which is why it stays the default.
+  A broker pays off when jobs must survive restarts, when producer and consumer are separate services,
+  or when several workers share the work."
+
+### Mistakes
+| Mistake | Fix / lesson |
+|---|---|
+| Renamed `CanRun` to `IsFinal` but kept CanRun's list (Queued, Running, Cancelled) | Every new Queued run was skipped as "finished". The import pipeline test caught it in 30 s. Renaming to the opposite meaning means listing the other statuses |
+| Thought "State: running" in the RabbitMQ UI was an import still running | It is the queue's state. Read Ready / Unacked for the messages |
+| Ack after a graceful stop raced the shutdown (run 7) | No ack when `stoppingToken` is cancelled, and `IsFinal` lets Cancelled runs run again |

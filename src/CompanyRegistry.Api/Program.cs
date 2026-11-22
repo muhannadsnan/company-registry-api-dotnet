@@ -1,6 +1,7 @@
 using CompanyRegistry.Api.Auth;
 using CompanyRegistry.Api.Data;
 using CompanyRegistry.Api.Import;
+using CompanyRegistry.Api.Import.RabbitMq;
 using CompanyRegistry.Api.Infrastructure;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
@@ -63,11 +64,25 @@ builder.Services.AddHttpClient<BrregClient>((sp, http) =>
     })
     .AddStandardResilienceHandler();
 
-builder.Services.AddSingleton<ImportQueue>();
 builder.Services.AddScoped<ImportRunService>();
 builder.Services.AddScoped<CompanyImporter>();
-builder.Services.AddHostedService<ImportWorker>();
 builder.Services.AddHostedService<ImportScheduler>();
+
+// Queue: in memory by default (Render, tests, CI); RabbitMQ when Queue__Provider=RabbitMq.
+builder.Services.AddOptions<QueueOptions>()
+    .Bind(builder.Configuration.GetSection(QueueOptions.Section));
+if (builder.Configuration.GetValue<string>("Queue:Provider") == "RabbitMq")
+{
+    builder.Services.AddSingleton<IImportQueue, RabbitMqImportQueue>();
+    builder.Services.AddHostedService<RabbitMqImportConsumer>();
+}
+else
+{
+    builder.Services.AddSingleton<ImportQueue>();
+    builder.Services.AddSingleton<IImportQueue>(sp => sp.GetRequiredService<ImportQueue>());
+    builder.Services.AddHostedService<ImportWorker>();
+}
+
 
 var app = builder.Build();
 

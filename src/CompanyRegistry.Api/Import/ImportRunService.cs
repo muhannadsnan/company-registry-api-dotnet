@@ -6,7 +6,7 @@ namespace CompanyRegistry.Api.Import;
 public sealed record QueueResult(ImportRun Run, bool AlreadyActive);
 
 /// <summary>Creates an import_runs row and puts it on the queue. Only one import may be queued or running at a time.</summary>
-public sealed class ImportRunService(AppDbContext db, ImportQueue queue)
+public sealed class ImportRunService(AppDbContext db, IImportQueue queue)
 {
     public async Task<QueueResult> QueueAsync(string trigger, string? requestedBy, string? correlationId, CancellationToken ct)
     {

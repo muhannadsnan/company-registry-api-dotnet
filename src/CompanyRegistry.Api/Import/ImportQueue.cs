@@ -6,7 +6,7 @@ namespace CompanyRegistry.Api.Import;
 /// In-process queue between whoever asks for an import (the API, the scheduler) and the worker that runs it.
 /// Registered as a singleton, so producers and the consumer share the same channel.
 /// </summary>
-public sealed class ImportQueue
+public sealed class ImportQueue : IImportQueue
 {
     private readonly Channel<long> _channel = Channel.CreateUnbounded<long>();
 

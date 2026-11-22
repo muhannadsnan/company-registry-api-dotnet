@@ -31,4 +31,8 @@ public class ImportRun
     public string? Error { get; set; }
 
     public bool IsActive => Status is ImportStatus.Queued or ImportStatus.Running;
+
+    /// <summary>Succeeded|Failed|Abandoned never change again. 
+    /// Cancelled is not final: a shutdown stopped it, so it may run again.</summary>
+    public bool IsFinal => Status is ImportStatus.Succeeded or ImportStatus.Failed or ImportStatus.Abandoned;
 }

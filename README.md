@@ -44,6 +44,13 @@ docker compose up -d                                # Postgres on localhost:5433
 dotnet run --project src/CompanyRegistry.Api        # API on http://localhost:5080, migrates the database on start
 ```
 
+Optional: use RabbitMQ instead of the in-process queue (management UI on http://localhost:15672, guest/guest):
+
+```bash
+docker compose up -d rabbitmq
+Queue__Provider=RabbitMq dotnet run --project src/CompanyRegistry.Api
+```
+
 Get a token, start an import, and search:
 
 ```bash
@@ -96,8 +103,9 @@ Errors are returned as RFC 9457 problem details, and each one includes the reque
   (retries with backoff, timeouts, circuit breaker). Brreg occasionally answers with a 5xx.
   The import should retry those, not fail on the first one.
 - **Queued, not run inside the request.** `POST /api/imports` writes an `import_runs` row
-  and puts its id on an in-process `Channel`. A `BackgroundService` takes runs off the queue
-  one at a time. The caller gets `202 Accepted` at once and polls the run. Only one import may
+  and puts its id on a queue: an in-process `Channel` by default, or RabbitMQ when
+  `Queue__Provider=RabbitMq` (local only; the hosted demo uses the in-process queue).
+  A `BackgroundService` takes runs off the queue one at a time. The caller gets `202 Accepted` at once and polls the run. Only one import may
   be queued or running at a time.
 - **Validated at the boundary.** Every unit is checked before it is stored: the organisation
   number must pass MOD11, and the name and organisation form must be present. Rejected rows are
@@ -111,6 +119,10 @@ Errors are returned as RFC 9457 problem details, and each one includes the reque
 - **The import log is a table.** `import_runs` records who triggered each run and when, how it
   ended, and rows read, inserted, updated, unchanged and rejected. Runs that were interrupted by
   a restart are marked `Abandoned` on startup, so none stay "Running" forever.
+- **RabbitMQ mode: acked only when done.** The consumer uses manual acks and a prefetch of 1, so
+  a run's message is deleted only after the import finishes. A crash or a graceful shutdown puts it
+  back on the queue and the next start runs it again; a run that already finished is skipped.
+  Publishing after the database commit is not atomic; a real system would use an outbox table.
 - **Only business fields are stored.** Brreg also returns e-mail addresses and phone numbers;
   the API does not read them.
 
@@ -215,6 +227,7 @@ src/CompanyRegistry.Api/
   Data/                 Entities, AppDbContext, migrations
   Domain/               OrganisationNumber (MOD11)
   Import/               BrregClient, CompanyImporter, ImportQueue, ImportWorker, ImportScheduler
+  Import/RabbitMq/      Optional RabbitMQ publisher and consumer
   Auth/                 Scopes and policies, AuthOptions, DevTokenIssuer
   Infrastructure/       Correlation id middleware, OpenAPI bearer scheme
 tests/CompanyRegistry.Tests/

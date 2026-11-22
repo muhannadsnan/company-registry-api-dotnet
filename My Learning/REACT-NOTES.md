@@ -26,7 +26,7 @@ Two frontends, both typed by me with an AI tutor guiding the steps:
 | 11 | Token expiry: automatic logout, and a 401 sends you to the login page | ✅ |
 | 12 | Import page with polling (link only for users with `companies.import`) | ✅ |
 | 13 | Tailwind: setup, basic styling per element, shared classes in `tw.ts` (13d) | ✅ |
-| 14 | (main project, not React) RabbitMQ: a first quick try; practice3 repeats it | ⏳ |
+| 14 | (main project, not React) RabbitMQ: publisher, consumer with manual ack, graceful stop hands the job back. Notes: COMPANY-REGISTRY-NOTES section 7; practice3 repeats it | ✅ |
 
 # Part 1: `web/`
 
