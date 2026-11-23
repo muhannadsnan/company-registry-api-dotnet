@@ -45,6 +45,14 @@ worker creates a fresh scope per import run.
 >
 > **In the worker.** ImportWorker takes IServiceScopeFactory, a singleton, and creates a new scope per run; the
 > DbContext comes from that scope, and `await using` disposes it at the end of each loop.
+>
+> **One object, two types.** Each registration creates its own instance, so `AddSingleton<ImportQueue>()` plus
+> `AddSingleton<IImportQueue, ImportQueue>()` would give two queues: the service writes a run id into queue A, and
+> the worker reads queue B and never finds it. The lambda `sp => sp.GetRequiredService<ImportQueue>()` gives
+> whoever asks for the interface the ImportQueue that already exists: one object, reachable under two types.
+>
+> **Why an interface.** ImportRunService depends on IImportQueue, so Program.cs can switch the queue (in-memory or
+> RabbitMQ) through config without changing ImportRunService, and tests can pass in a fake queue.
 
 ## 2. Middleware and the request pipeline
 
@@ -65,7 +73,9 @@ before anyone has read the token, so every user looks anonymous. Every protected
 > layer gets the request and a `next`: the code before `await next` runs on the way in, the code after it runs on
 > the way out, after the controller has answered, so the layers finish in reverse order.
 >
-> **Short-circuit.** A layer can also skip `next` and answer itself, like authorisation returning 401.
+> **Short-circuit.** A layer can also send the response itself and skip `next`: UseAuthorization answers 401
+> without a valid token, or 403 when the token lacks the scope, and the controller never runs. (The 400 for a
+> missing [Required] field is not middleware: [ApiController] model validation runs inside the endpoint.)
 >
 > **Why correlation goes first.** CorrelationIdMiddleware goes first so it covers every layer after it: its log
 > scope puts the request's id on every later log line, errors included; every response gets the X-Correlation-ID
@@ -107,8 +117,10 @@ under load), and can deadlock in some contexts. "Async all the way down."
 >
 > **Cancellation.** The CancellationToken is the stop signal for work in progress: when the user closes the browser,
 > the running query or HTTP call is cancelled instead of finishing for nobody, and when the app shuts down,
-> ImportWorker's stoppingToken stops the import at the next await. The final save uses CancellationToken.None, so
-> the run's status is still written and the row isn't left Running.
+> ImportWorker's stoppingToken stops the import at the next await. Cancelling never "finishes the write": the page in
+> progress is dropped (it throws OperationCanceledException), and only pages committed before it stay. The final
+> save uses CancellationToken.None because ct is already cancelled by then and would make that save throw too; with
+> None, the run's status (Cancelled) is still written and the row isn't left Running.
 
 ## 4. EF Core: DbContext, DbSet, migrations, change tracking, AsNoTracking
 
@@ -207,8 +219,9 @@ and Microsoft's newer default; this repo uses them for `/health` and `/docs`.
 > dependencies through the constructor, like a Laravel controller.
 >
 > **Why controllers.** I chose controllers because most existing enterprise .NET code uses them, so it's what I'll
-> maintain at work, and a class groups related endpoints under one route prefix and one [Authorize] (with minimal
-> APIs I'd use MapGroup).
+> maintain at work, and a class groups related endpoints under one route prefix and one [Authorize]. With minimal
+> APIs I'd use `app.MapGroup("/api/companies").RequireAuthorization("companies.read")`: the auth system's method
+> instead of the attribute, and `.AllowAnonymous()` for one public endpoint, like `/health` in Program.cs.
 >
 > **What [ApiController] gives.** [ApiController] gives: automatic 400 validation, so a login without Username
 > ([Required] on LoginRequest) gets a 400 ValidationProblemDetails response before Login runs, no exception and no
