@@ -328,8 +328,9 @@ get three imports. Fixes: a database lock or lease, a real message queue, or run
 > **What it is.** A BackgroundService is a class registered in Program.cs with `AddHostedService<ImportWorker>()`.
 > It starts with the app (ExecuteAsync runs once at startup), lives in the same process, shares DI, config and
 > logging with the API, and stops with the app. stoppingToken fires when the app shuts down (Ctrl+C, a deploy,
-> SIGTERM); the worker passes it to the importers, so an import in progress is cancelled instead of killed in the
-> middle of a write. It's like Laravel's `queue:work`, but inside the API process. A cron job is time-based (run at
+> SIGTERM); the worker passes it to the importers, so the import stops at the next await. Cancelling stops, it never
+> completes: the page in progress is dropped, pages already committed stay, and the final status is saved with
+> CancellationToken.None. It's like Laravel's `queue:work`, but inside the API process. A cron job is time-based (run at
 > 02:00); ImportWorker is job-based: it waits on the Channel for run ids (a time-based one would loop on a
 > PeriodicTimer).
 >
@@ -366,6 +367,9 @@ to start with invalid config.
 **In my words:**
 > **Layers.** A setting like Jwt:SigningKey comes from layers, and the later one wins: appsettings.json,
 > appsettings.{Environment}.json, user secrets (Development only), environment variables, command-line arguments.
+> `Queue__Provider=RabbitMq dotnet run ...` (step 14) is an environment variable for that one command, not a
+> command-line argument (that would be `-- --Queue:Provider=RabbitMq`); `__` stands for `:`, which many shells
+> don't allow in variable names. It beats `"Provider": "InMemory"` because env vars come after appsettings.json.
 >
 > **Where the key comes from.** Locally it's Development, so the key comes from user secrets: the csproj's
 > UserSecretsId names the folder ~/.microsoft/usersecrets/<id>/secrets.json, outside the repo. The tests run as
@@ -408,14 +412,22 @@ certificate and gets an access token with the scopes Digdir has granted it. The 
 Maskinporten's public keys and checks the scope. In this repo, swapping the local token issuer for Maskinporten changes
 the `AddJwtBearer` configuration only; policies and controllers stay the same.
 
+**HMAC key vs public key (new in the 2026-11-24 quiz):** our dev tokens use HMAC, one shared secret that both signs and
+verifies, so whoever can verify could also forge. Maskinporten signs with its **private** key, which only Maskinporten
+has, and publishes the matching **public** key at a URL (JWKS). The API verifies with the public key and can't create
+tokens. In code: `Authority = "https://maskinporten.no/"` (or the test environment) instead of `IssuerSigningKey`;
+.NET downloads and refreshes the public keys itself. The issuer changes from `company-registry-dev` to Maskinporten.
+
 **In repo:** `Auth/Scopes.cs` (`RequireScope`), `Program.cs` (policies + fallback policy), `Auth/DevTokenIssuer.cs`.
 
 **Common question:** *"Why `MapInboundClaims = false`?"* → By default .NET renames JWT claims to long legacy URIs
 (`sub` → `http://schemas.xmlsoap.org/.../nameidentifier`). Turning it off keeps claim names as they are in the token.
 
 **In my words:**
-> **401 vs 403.** Authentication is who you are: the JWT bearer handler validates the token, and if it's missing or
-> invalid the answer is 401 (officially "Unauthorized", but it means unauthenticated). Authorisation is what you may
+> **401 vs 403.** Authentication is who you are: the JWT bearer handler validates the token (signature, iss, aud,
+> exp) and sets HttpContext.User with its claims; it never rejects anything itself, a missing or invalid token just
+> leaves the user anonymous. Authorisation never looks at the token, only at the user's claims: anonymous on a
+> protected endpoint gives 401 (officially "Unauthorized", but it means unauthenticated). Authorisation is what you may
 > do: a policy checks the claims, and a known caller without the right scope gets 403. From the tests: GET
 > /api/companies without a token is 401; the reader (only companies.read) calling POST /api/imports is 403. Laravel:
 > auth middleware vs Gates/`can:`.
