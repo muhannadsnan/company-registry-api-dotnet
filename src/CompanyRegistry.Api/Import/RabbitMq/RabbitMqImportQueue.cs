@@ -10,7 +10,7 @@ namespace CompanyRegistry.Api.Import.RabbitMq;
 /// </summary>
 public sealed class RabbitMqImportQueue(IOptions<QueueOptions> options) : IImportQueue
 {
-    public async ValueTask  EnqueueAsync(long importRunId, CancellationToken ct)
+    public async ValueTask EnqueueAsync(long importRunId, CancellationToken ct)
     {
         var o = options.Value;
         var factory = new ConnectionFactory { HostName = o.HostName };

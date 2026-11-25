@@ -42,7 +42,7 @@ public sealed class RabbitMqImportConsumer(
                     return;
                 }
                 // done: RabbitMQ deletes it
-                await channel.BasicAckAsync(message.DeliveryTag, multiple: false); 
+                await channel.BasicAckAsync(message.DeliveryTag, multiple: false);
             }
             catch (Exception ex)
             {
